@@ -746,7 +746,7 @@ function buildHrTab(body){
         uiRange('hrFloor', cfg.floor, {min: 0, max: 100, format: function(v){ return v + "%"; }}, null, function(v){ cfg.floor = v; changed(); }).el);
     uiSetting(resp, "Rejoin time", "After an edge, strokes ramp back to full over this long.",
         uiRange('hrRejoin', cfg.rejoinSec, {min: 0, max: 60, format: sec}, null, function(v){ cfg.rejoinSec = v; changed(); }).el);
-    uiSetting(resp, "Signal timeout", "If the monitor sends nothing for this long, the device stops.",
+    uiSetting(resp, "Signal timeout", "If the monitor sends no real reading for this long (disconnected, or taken off), the device stops.",
         uiRange('hrTimeout', cfg.timeoutSec, {min: 3, max: 20, format: sec}, null, function(v){ cfg.timeoutSec = v; changed(); }).el);
 
     var decay = uiSection(body, "Adaptive ceiling decay", "Lowers the ceiling as edges add up, to counter fatigue over a long session.");
@@ -967,8 +967,11 @@ var hr = {
     characteristic: null,
     battery: null,
     retry: 0,
-    manualDisconnect: false
+    manualDisconnect: false,
+    rrSeen: false,      // this connection has sent beat timing (RR intervals) at least once
+    rejecting: null     // why the latest packets aren't counted: 'contact' | 'beats' | null
 };
+var hrPacketLog = [];   // debug: recent raw packets, newest last
 var HR_MIN_VALID = 35;                  // anything lower is a bad read, not a heartbeat
 var HR_RETRY_MS = [1000, 2000, 4000];   // reconnect attempts after an unexpected drop
 var hrSimTimer = null;
@@ -976,7 +979,9 @@ var hrSimBpm = 80;
 
 // Decode a Heart Rate Measurement value (GATT 0x2A37). Byte 0 is flags: bit 0 picks a
 // uint8 or uint16 BPM, bits 1-2 report skin contact (0b11 contact, 0b10 none, else
-// unsupported). Returns null when the value is too short to hold a reading.
+// unsupported), bit 3 adds a 2-byte energy field, bit 4 adds RR intervals (2 bytes per
+// detected beat). Returns {bpm, contact, rr} where rr is how many beats the packet
+// timed, or null when the value is too short to hold a reading.
 function parseHrMeasurement(view){
     if(!view || view.byteLength < 2){ return null; }
     var flags = view.getUint8(0);
@@ -985,7 +990,21 @@ function parseHrMeasurement(view){
     var bpm = wide ? view.getUint16(1, true) : view.getUint8(1);
     var contactBits = (flags >> 1) & 0x03;
     var contact = contactBits === 0x03 ? true : (contactBits === 0x02 ? false : null);
-    return { bpm: bpm, contact: contact };
+    var offset = (wide ? 3 : 2) + ((flags & 0x08) ? 2 : 0);
+    var rr = (flags & 0x10) ? Math.max(0, Math.floor((view.byteLength - offset) / 2)) : 0;
+    return { bpm: bpm, contact: contact, rr: rr };
+}
+
+// Whether a packet is a real reading. A strap taken off often keeps sending its last
+// BPM, so besides the obvious (too low to be a pulse) a packet doesn't count when the
+// sensor says it has no skin contact, or when a sensor that has been timing beats
+// (RR intervals) stops timing them. Rejected packets don't refresh the reading, so the
+// signal timeout trips as it would for a dropped connection.
+function hrPacketVerdict(m, rrSeen){
+    if(m.bpm < HR_MIN_VALID){ return 'low'; }
+    if(m.contact === false){ return 'contact'; }
+    if(rrSeen && m.rr === 0){ return 'beats'; }
+    return 'ok';
 }
 
 // The single entry point for a new reading, from the monitor or the simulator.
@@ -1002,7 +1021,19 @@ function hrLive(){ return hr.status === 'live' && hr.bpm != null; }
 function onHrValue(e){
     var m = parseHrMeasurement(e.target.value);
     if(!m){ return; }
-    if(m.bpm < HR_MIN_VALID){ hr.contact = m.contact; return; }
+    var verdict = hrPacketVerdict(m, hr.rrSeen);
+    if(m.rr > 0){ hr.rrSeen = true; }
+    if(settings.debug){
+        hrPacketLog.push({ t: Date.now(), bpm: m.bpm, contact: m.contact, rr: m.rr, verdict: verdict });
+        if(hrPacketLog.length > 600){ hrPacketLog.splice(0, hrPacketLog.length - 600); }
+    }
+    hr.contact = m.contact;
+    if(verdict !== 'ok'){
+        hr.rejecting = verdict === 'low' ? 'contact' : verdict;
+        updateHrUi();
+        return;
+    }
+    hr.rejecting = null;
     feedHr(m.bpm, m.contact);
 }
 
@@ -1050,6 +1081,8 @@ async function openHrGatt(silent){
         hr.characteristic = ch;
         hr.source = 'ble';
         hr.retry = 0;
+        hr.rrSeen = false;
+        hr.rejecting = null;
         setHrStatus('live');
         readHrBattery(server);
         showToast(silent ? "Heart Rate Reconnected" : "Heart Rate Connected", settings.hr.deviceName, "success");
@@ -1159,7 +1192,8 @@ function hrStatusText(){
     var name = settings.hr.deviceName || "Monitor";
     switch(hr.status){
         case 'live': return (hr.source === 'sim' ? "Simulated" : name) + (hr.bpm != null ? " · " + hr.bpm + " BPM" : "") +
-                            (hr.battery != null ? " · battery " + hr.battery + "%" : "") + (hr.contact === false ? " · no skin contact" : "");
+                            (hr.battery != null ? " · battery " + hr.battery + "%" : "") +
+                            (hr.rejecting === 'contact' ? " · no skin contact" : (hr.rejecting === 'beats' ? " · no beats detected" : ""));
         case 'connecting': return "Connecting to " + name + "…";
         case 'reconnecting': return "Reconnecting to " + name + "…";
         case 'lost': return name + " lost";
@@ -1236,6 +1270,8 @@ function publishDebugApi(){
         hr: function(){ return { bpm: hr.bpm, at: hr.at, ageMs: hr.at ? Date.now() - hr.at : null, contact: hr.contact,
                                  status: hr.status, source: hr.source, battery: hr.battery }; },
         governor: function(){ return { last: lastGov, session: Object.assign({}, hrSession), marks: climaxMarksMs.slice() }; },
+        // Raw monitor packets (debug mode only): {t, bpm, contact, rr, verdict}.
+        hrPackets: function(){ return hrPacketLog.slice(); },
         resetSession: resetHrSession,
         state: function(){
             var axes = {};

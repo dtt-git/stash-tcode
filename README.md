@@ -70,7 +70,9 @@ its heart rate. Then turn it on under **Heart Rate**.
   the **rejoin time** (default 8 s).
 - **Adaptive ceiling decay** lowers the ceiling 2 BPM every 2 edges, down to a floor (105 BPM by
   default), to counter fatigue over a long session. It never raises the ceiling above what you typed.
-- **Signal timeout:** if a connected monitor sends nothing for 8 s, the device stops. With no monitor
+- **Signal timeout:** if a connected monitor sends no real reading for 8 s, the device stops. That
+  includes a strap that's been taken off but keeps repeating its last BPM: packets flagged "no skin
+  contact", or a strap that was timing beats and stopped, don't count as readings. With no monitor
   connected at all, scripts play normally.
 - **Session** shows the live state, and **Reset** clears the edge count and decay. The session
   survives a page reload but ends when you close the tab.
@@ -109,16 +111,19 @@ Turn on **Advanced → Debug mode** to get:
 - **Simulated device:** stands in for the hardware. Commands are recorded but nothing moves.
 - **Simulate heart rate:** a steady reading once a second in place of a monitor.
 - `window.__tcode` in the page console: `commands()` (axis commands sent, parsed), `tx()`,
-  `clearTx()`, `state()`, `hr()`, `setHr(bpm)` / `setHr(null)`, `governor()`, `resetSession()`
+  `clearTx()`, `state()`, `hr()`, `hrPackets()` (raw monitor packets), `setHr(bpm)` / `setHr(null)`,
+  `governor()`, `resetSession()`
   and `simulateDevice()`.
 
 ### Tests
 
 The heart-rate governor's math (approach band, edge hysteresis, decay, rejoin ramp, climax window,
-watchdog and axis shaping), the auto-motion sine and the speed limit are covered by plain Node tests:
+watchdog and axis shaping), the auto-motion sine and the speed limit, plus heart-rate packet decoding,
+are covered by plain Node tests:
 
 ```
 node tests/governor.test.js
+node tests/hr-packets.test.js
 ```
 
 ### Releasing
