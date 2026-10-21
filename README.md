@@ -18,7 +18,8 @@ Based on Stash-TCode by Steel (Spunkle-Modded), licensed GPLv3.
 ## Install
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
-2. Create a new script, paste in the contents of [`stash-tcode.user.js`](stash-tcode.user.js), and save it.
+2. Open **[stash-tcode.user.js (raw)](https://raw.githubusercontent.com/dtt-git/stash-tcode/main/stash-tcode.user.js)**.
+   Tampermonkey shows its install page; click **Install**. It then checks this repo for updates automatically.
 3. Open Stash (it should be on port 9999). Click **Connect** in the navbar, then pick your device's serial port.
 
 Web Serial only works in Chromium-based browsers and only on a secure origin.
@@ -42,4 +43,6 @@ to *Always*.
 
 ### Releasing
 
-Bump `@version` in the header of `stash-tcode.user.js`. Tampermonkey uses this to detect updates.
+Bump `@version` in the header of `stash-tcode.user.js` and push to `main`. Installed copies pick up
+the new version on Tampermonkey's next update check, because of the script's `@updateURL`.
+If you don't bump the version, Tampermonkey ignores the change.

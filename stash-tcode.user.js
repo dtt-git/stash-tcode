@@ -11,6 +11,10 @@
 // @grant        GM_info
 // @grant        unsafeWindow
 // @license      GPLv3
+// @homepageURL  https://github.com/dtt-git/stash-tcode
+// @supportURL   https://github.com/dtt-git/stash-tcode/issues
+// @updateURL    https://raw.githubusercontent.com/dtt-git/stash-tcode/main/stash-tcode.user.js
+// @downloadURL  https://raw.githubusercontent.com/dtt-git/stash-tcode/main/stash-tcode.user.js
 // ==/UserScript==
 
 var video="";
