@@ -113,6 +113,7 @@ function loadSettings(){
     var thisVersion = GM_info.script.version;
     var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5}; };
     var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true,
+                           "speedLimit": false, "maxSpeed": 5,
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
@@ -592,6 +593,12 @@ function buildDeviceTab(body){
     uiSetting(play, "Sync offset", "Shifts the script against the video. Positive plays strokes earlier.",
         uiRange('sync', parseInt(settings.sync) || 0, {min: -250, max: 250, origin: 0, format: ms}, null,
                 function(v){ settings.sync = v; saveSettings(); }).el);
+    var speedRow;
+    uiSetting(play, "Speed limit", "Cap how fast any axis can move. Faster moves are shortened so they stay in sync with the video.",
+        uiSwitch('speedLimit', settings.speedLimit, function(v){ settings.speedLimit = v; speedRow.classList.toggle('disabled', !v); saveSettings(); }));
+    speedRow = uiSetting(play, "Max speed", "1 u/s is the device's full travel in one second.",
+        uiRange('maxSpeed', settings.maxSpeed, {min: MAX_SPEED_MIN, max: MAX_SPEED_MAX, step: 0.5, format: function(v){ return v.toFixed(1) + " u/s"; }}, null,
+                function(v){ settings.maxSpeed = v; saveSettings(); }).el, {sub: true, disabled: !settings.speedLimit});
 
     var home = uiSection(body, "Homing");
     uiSetting(home, "Home on connect and scene change", "Off leaves the device wherever it stopped.",
@@ -827,6 +834,7 @@ async function openPort(p, silent) {
     serialConnected = true;
     simulatedDevice = false;
     keepReading = true;
+    forgetAxisPositions();
     // Remember which device this was so it can be reopened without the picker next time.
     try {
         var info = port.getInfo();
@@ -1188,6 +1196,7 @@ function connectSimulatedDevice(){
         }
     };
     serialConnected = true;
+    forgetAxisPositions();
     showToast("Simulated Device", "Commands are recorded, nothing is sent", "info");
     updateNavButton();
 }
@@ -1958,6 +1967,30 @@ function autoMotion(axis, ms, jumped, a){
 
 // ---------------------------------
 
+// --- SPEED LIMIT ---
+// Caps how fast an axis may travel, in u/s: 1 u/s is the device's full travel (0-9999)
+// in one second. A move that would be faster has its end pulled back toward where the
+// axis is, so it fits in the same time. Timing never changes, so playback stays in sync,
+// and the next move starts from the clipped point.
+
+var MAX_SPEED_MIN = 0.5;
+var MAX_SPEED_MAX = 10;
+
+function limitSpeed(from, to, intervalMs, maxUps){
+    if(from == null || !(maxUps > 0)){ return to; }
+    var reach = maxUps * 9999 * Math.max(0, intervalMs) / 1000;
+    var d = to - from;
+    if(Math.abs(d) <= reach){ return to; }
+    return Math.round(from + Math.sign(d) * reach);
+}
+
+// Where each axis was last sent is unknown after (re)connecting.
+function forgetAxisPositions(){
+    for(var ax in AXIS){ AXIS[ax].lastPos = null; }
+}
+
+// ---------------------------------
+
 function listAxes(exclude=""){
     var keys = Object.keys(AXIS);
     let removeAxis = keys.indexOf(exclude);
@@ -1998,7 +2031,16 @@ function centerAxis(axis){
     if(!AXIS[axis].limits || AXIS[axis].limits == null){ setTimeout(function(){ centerAxis(axis)}, 500); return -1; }
     var ramp = parseInt(settings.centerTime);
     if(!isFinite(ramp) || ramp < 0){ ramp = 1000; }
-    sendTCode(axis + String(getCenter(axis)).padStart(4, '0') + "I" + ramp + '\n');
+    var home = getCenter(axis);
+    var from = AXIS[axis].lastPos;
+    // Homing is slowed rather than shortened by the speed limit: it has to arrive. An
+    // unknown start position is treated as the far end of travel.
+    if(settings.speedLimit && settings.maxSpeed > 0){
+        var dist = from != null ? Math.abs(home - from) : Math.max(home, 9999 - home);
+        ramp = Math.max(ramp, Math.ceil(dist / (settings.maxSpeed * 9999) * 1000));
+    }
+    AXIS[axis].lastPos = home;
+    sendTCode(axis + String(home).padStart(4, '0') + "I" + ramp + '\n');
 }
 
 // Park every enabled axis now (used by the Center Now button).
@@ -2016,6 +2058,8 @@ function queueMove(axis, pos, int){
     pos = clamp9999(pos);
     int = Math.round(Number(int));
     if(!isFinite(int) || int < 0){ int = 0; }
+    if(settings.speedLimit){ pos = limitSpeed(AXIS[axis].lastPos, pos, int, settings.maxSpeed); }
+    AXIS[axis].lastPos = pos;
     // TCode magnitude is the digits after "0." -- send all four so the axis can reach
     // its real endpoints (two digits capped every axis at 0.99 and quantised to 1%).
     var cmd = axis + String(pos).padStart(4, '0') + "I" + int;

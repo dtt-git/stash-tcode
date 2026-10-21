@@ -18,7 +18,7 @@ function showToast(t){ toasts.push(t); } function debug(){}
 function getCenter(){ return 5000; }
 `;
 const api = new Function(env + section + `
-return { sinePosition, workingCeiling, approachFactor, rejoinFactor, climaxFactor, updateEdgeState, computeAllowance, shapePosition,
+return { limitSpeed, sinePosition, workingCeiling, approachFactor, rejoinFactor, climaxFactor, updateEdgeState, computeAllowance, shapePosition,
          hrSession, settings, hr, setMarks: (m) => { climaxMarksMs = m; }, toasts: () => toasts };`)();
 
 let fails = 0;
@@ -127,6 +127,14 @@ check('sine trough at three quarters', near(api.sinePosition(0.5, 1500, 0), 0));
 check('sine stays in 0..100', [0, 0.05, 1, 3].every(hz => Array.from({length: 200}, (_, i) => api.sinePosition(hz, i * 37, 3)).every(p => p >= 0 && p <= 100)));
 check('sine frequency clamped to 3 Hz', near(api.sinePosition(10, 1000 / 12, 0), api.sinePosition(3, 1000 / 12, 0)));
 check('axes start at different points', !near(api.sinePosition(0.5, 0, 0), api.sinePosition(0.5, 0, 3)));
+
+// --- speed limit (u/s: 1 = full 0-9999 travel per second) ---
+check('within limit unchanged', api.limitSpeed(0, 4000, 1000, 5) === 4000);
+check('too fast is shortened, same direction', api.limitSpeed(0, 9999, 100, 5) === 5000 && api.limitSpeed(9999, 0, 100, 5) === 5000);
+check('exactly at limit unchanged', api.limitSpeed(1000, 1000 + 9999, 1000, 1) === 1000 + 9999);
+check('unknown start not limited', api.limitSpeed(null, 9999, 10, 1) === 9999);
+check('limit off (0) not limited', api.limitSpeed(0, 9999, 10, 0) === 9999);
+check('zero interval stays put', api.limitSpeed(3000, 9000, 0, 5) === 3000);
 
 console.log(fails ? fails + ' FAILED' : 'all passed');
 process.exit(fails ? 1 : 0);
