@@ -128,13 +128,13 @@ check('sine stays in 0..100', [0, 0.05, 1, 3].every(hz => Array.from({length: 20
 check('sine frequency clamped to 3 Hz', near(api.sinePosition(10, 1000 / 12, 0), api.sinePosition(3, 1000 / 12, 0)));
 check('axes start at different points', !near(api.sinePosition(0.5, 0, 0), api.sinePosition(0.5, 0, 3)));
 
-// --- speed limit (TCode units per second; full travel is 0-9999) ---
-check('within limit unchanged', api.limitSpeed(0, 4000, 1000, 5000) === 4000);
-check('too fast is shortened, same direction', api.limitSpeed(0, 9999, 100, 50000) === 5000 && api.limitSpeed(9999, 0, 100, 50000) === 4999);
-check('exactly at limit unchanged', api.limitSpeed(1000, 9999, 1000, 8999) === 9999);
-check('unknown start not limited', api.limitSpeed(null, 9999, 10, 10000) === 9999);
+// --- speed limit (u/s as in MultiFunPlayer: 1 unit = a full 0-100% move, 0-9999) ---
+check('within limit unchanged', api.limitSpeed(0, 4000, 1000, 0.5) === 4000);
+check('too fast is shortened, same direction', api.limitSpeed(0, 9999, 100, 5) === 5000 && api.limitSpeed(9999, 0, 100, 5) === 5000);
+check('exactly at limit unchanged', api.limitSpeed(0, 9999, 1000, 1) === 9999);
+check('unknown start not limited', api.limitSpeed(null, 9999, 10, 1) === 9999);
 check('limit off (0) not limited', api.limitSpeed(0, 9999, 10, 0) === 9999);
-check('zero interval stays put', api.limitSpeed(3000, 9000, 0, 50000) === 3000);
+check('zero interval stays put', api.limitSpeed(3000, 9000, 0, 5) === 3000);
 
 console.log(fails ? fails + ' FAILED' : 'all passed');
 process.exit(fails ? 1 : 0);

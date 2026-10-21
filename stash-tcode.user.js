@@ -111,9 +111,9 @@ function saveSettings(){
 
 function loadSettings(){
     var thisVersion = GM_info.script.version;
-    var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5}; };
+    var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5,
+                                                  speedLimit: false, maxSpeed: 5}; };
     var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true,
-                           "speedLimit": false, "maxUnitsPerSec": 50000,
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
@@ -130,12 +130,19 @@ function loadSettings(){
         if(settings.hr.edgeHr == null){ settings.hr.edgeHr = settings.hr.climaxHr; }
         delete settings.hr.climaxHr;
     }
-    // Max speed was briefly stored in full-travels per second ("maxSpeed"); it's now TCode
-    // units (0-9999 scale) per second.
-    if(settings.maxSpeed != null){
-        if(settings.maxUnitsPerSec == null){ settings.maxUnitsPerSec = Math.round(settings.maxSpeed * 9999 / 500) * 500; }
-        delete settings.maxSpeed;
+    // The speed limit started as one global setting (in full travels/s as "maxSpeed",
+    // then TCode units/s as "maxUnitsPerSec"). It's now per axis, in full travels/s like
+    // MultiFunPlayer. Carry a global setting onto every axis.
+    var globalLimit = settings.maxUnitsPerSec != null ? settings.maxUnitsPerSec / 9999
+                    : (settings.maxSpeed != null ? settings.maxSpeed : null);
+    if(settings.axes && (globalLimit != null || settings.speedLimit != null)){
+        for(const ax in settings.axes){
+            var a = settings.axes[ax];
+            if(a.maxSpeed == null && globalLimit != null){ a.maxSpeed = Math.round(globalLimit * 4) / 4; }
+            if(a.speedLimit == null){ a.speedLimit = !!settings.speedLimit; }
+        }
     }
+    delete settings.speedLimit; delete settings.maxUnitsPerSec; delete settings.maxSpeed;
     backfillDefaults(settings, defaultSettings);
     // Drop settings for features that no longer exist (hotkeys, random motion).
     for(const gone of ["device", "initialKey", "minKey", "settingsKey", "syncKey"]){ delete settings[gone]; }
@@ -190,6 +197,7 @@ function injectUiStyles(){
 #tcode-modal .setting-group { padding-bottom: 0; }
 #tcode-modal .setting-group:not(:last-child) { border-bottom: 1px solid #000; }
 #tcode-modal .setting-group > .setting { border-bottom: none; }
+#tcode-modal .setting-group .setting { flex-wrap: nowrap; } /* Stash wraps grouped rows; keep controls beside their label */
 #tcode-modal .setting-group.collapsed > .setting:not(:first-child) { display: none; }
 #tcode-modal .modal-footer { justify-content: space-between; }
 #tcode-modal .tcode-version { color: ${STASH.muted}; font-size: .8rem; }
@@ -201,7 +209,7 @@ function injectUiStyles(){
 #tcode-modal .tcode-list { margin: .25rem 0 0; padding-left: 1.1rem; color: ${STASH.muted}; }
 
 /* Range sliders: thin track in the input colour, accent fill, light thumb. */
-.tcode-range { display: flex; align-items: center; gap: .6rem; width: 280px; max-width: 100%; }
+.tcode-range { display: flex; align-items: center; gap: .6rem; width: 360px; max-width: 100%; }
 .tcode-range .tcode-track { position: relative; flex: 1 1 auto; height: 20px; }
 .tcode-range input[type=range] {
     -webkit-appearance: none; appearance: none; position: absolute; inset: 0; width: 100%; height: 20px;
@@ -220,8 +228,7 @@ function injectUiStyles(){
 .tcode-range.dual input[type=range] { pointer-events: none; }
 .tcode-range.dual input[type=range]::-webkit-slider-thumb { pointer-events: auto; }
 .tcode-range.dual input[type=range].upper::-webkit-slider-runnable-track { background: transparent; }
-.tcode-range output { min-width: 4.5em; text-align: right; font-variant-numeric: tabular-nums; color: ${STASH.text}; font-size: .9rem; }
-.tcode-range.dual output { min-width: 6.5em; }
+.tcode-range output { min-width: 10.5em; text-align: right; font-variant-numeric: tabular-nums; color: ${STASH.text}; font-size: .9rem; }
 
 /* Toasts, in Stash's secondary colour with a coloured edge per type. */
 #tcode-toasts { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 1080;
@@ -599,13 +606,6 @@ function buildDeviceTab(body){
     uiSetting(play, "Sync offset", "Shifts the script against the video. Positive plays strokes earlier.",
         uiRange('sync', parseInt(settings.sync) || 0, {min: -250, max: 250, origin: 0, format: ms}, null,
                 function(v){ settings.sync = v; saveSettings(); }).el);
-    var speedRow;
-    uiSetting(play, "Speed limit", "Cap how fast any axis can move. Faster moves are shortened so they stay in sync with the video.",
-        uiSwitch('speedLimit', settings.speedLimit, function(v){ settings.speedLimit = v; speedRow.classList.toggle('disabled', !v); saveSettings(); }));
-    speedRow = uiSetting(play, "Max speed", "In TCode units per second. An axis's full travel is 0-9999 units.",
-        uiRange('maxSpeed', settings.maxUnitsPerSec, {min: MAX_SPEED_MIN, max: MAX_SPEED_MAX, step: 500,
-                format: function(v){ return Math.round(v).toLocaleString('en-US') + " u/s"; }}, null,
-                function(v){ settings.maxUnitsPerSec = v; saveSettings(); }).el, {sub: true, disabled: !settings.speedLimit});
 
     var home = uiSection(body, "Homing");
     uiSetting(home, "Home on connect and scene change", "Off leaves the device wherever it stopped.",
@@ -662,6 +662,13 @@ function buildAxisGroup(card, axis){
     freqRow = uiSetting(group, "Frequency", "Full cycles per second.",
         uiRange('autoHz' + axis, cfg.autoHz, {min: AUTO_HZ_MIN, max: AUTO_HZ_MAX, step: 0.05, format: hzFormat}, null,
                 function(v){ cfg.autoHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.auto});
+    var speedRow;
+    uiSetting(group, "Speed limit", "Cap how fast this axis moves. Faster moves are shortened so they stay in sync with the video.",
+        uiSwitch('speedLimit' + axis, cfg.speedLimit, function(v){ cfg.speedLimit = v; speedRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
+    var speedFormat = function(v){ return v.toFixed(2) + " u/s · " + (1 / v).toFixed(3) + " s/unit"; };
+    speedRow = uiSetting(group, "Max speed", "1 unit is a full 0–100% move, so 1 u/s is the full travel in one second.",
+        uiRange('maxSpeed' + axis, cfg.maxSpeed, {min: MAX_SPEED_MIN, max: MAX_SPEED_MAX, step: 0.25, format: speedFormat}, null,
+                function(v){ cfg.maxSpeed = v; saveSettings(); }).el, {sub: true, disabled: !cfg.speedLimit});
     uiSetting(group, "Auto home", "Rest at the middle of the range. Turn off to choose the home position.",
         uiSwitch('autoCenter' + axis, cfg.autoCenter !== false, function(v){
             cfg.autoCenter = v;
@@ -1975,17 +1982,18 @@ function autoMotion(axis, ms, jumped, a){
 // ---------------------------------
 
 // --- SPEED LIMIT ---
-// Caps how fast an axis may travel, in TCode units per second (u/s): positions run
-// 0-9999, so 9999 u/s is the full travel in one second. A move that would be faster has
-// its end pulled back toward where the axis is, so it fits in the same time. Timing
-// never changes, so playback stays in sync, and the next move starts from the clipped point.
+// Caps how fast an axis may travel, per axis, in units per second (u/s) as MultiFunPlayer
+// uses them: 1 unit is a full 0-100% move (0-9999 in TCode), so 1 u/s is the full travel
+// in one second. A move that would be faster has its end pulled back toward where the
+// axis is, so it fits in the same time. Timing never changes, so playback stays in sync,
+// and the next move starts from the clipped point.
 
-var MAX_SPEED_MIN = 1000;
-var MAX_SPEED_MAX = 100000;
+var MAX_SPEED_MIN = 0.25;
+var MAX_SPEED_MAX = 20;
 
 function limitSpeed(from, to, intervalMs, maxUps){
     if(from == null || !(maxUps > 0)){ return to; }
-    var reach = maxUps * Math.max(0, intervalMs) / 1000;
+    var reach = maxUps * 9999 * Math.max(0, intervalMs) / 1000;
     var d = to - from;
     if(Math.abs(d) <= reach){ return to; }
     return Math.round(from + Math.sign(d) * reach);
@@ -2042,9 +2050,10 @@ function centerAxis(axis){
     var from = AXIS[axis].lastPos;
     // Homing is slowed rather than shortened by the speed limit: it has to arrive. An
     // unknown start position is treated as the far end of travel.
-    if(settings.speedLimit && settings.maxUnitsPerSec > 0){
+    var cfg = settings.axes[axis];
+    if(cfg.speedLimit && cfg.maxSpeed > 0){
         var dist = from != null ? Math.abs(home - from) : Math.max(home, 9999 - home);
-        ramp = Math.max(ramp, Math.ceil(dist / settings.maxUnitsPerSec * 1000));
+        ramp = Math.max(ramp, Math.ceil(dist / (cfg.maxSpeed * 9999) * 1000));
     }
     AXIS[axis].lastPos = home;
     sendTCode(axis + String(home).padStart(4, '0') + "I" + ramp + '\n');
@@ -2065,7 +2074,8 @@ function queueMove(axis, pos, int){
     pos = clamp9999(pos);
     int = Math.round(Number(int));
     if(!isFinite(int) || int < 0){ int = 0; }
-    if(settings.speedLimit){ pos = limitSpeed(AXIS[axis].lastPos, pos, int, settings.maxUnitsPerSec); }
+    var cfg = settings.axes[axis];
+    if(cfg && cfg.speedLimit){ pos = limitSpeed(AXIS[axis].lastPos, pos, int, cfg.maxSpeed); }
     AXIS[axis].lastPos = pos;
     // TCode magnitude is the digits after "0." -- send all four so the axis can reach
     // its real endpoints (two digits capped every axis at 0.99 and quantised to 1%).
