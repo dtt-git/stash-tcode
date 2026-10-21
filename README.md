@@ -20,6 +20,9 @@ Maintained by **dtt**. Originally based on Stash-TCode by Steel, with modificati
   playback stays in sync.
 - Auto motion: any axis the scene has no script for can follow a smooth sine wave at its own
   frequency, so a video without a funscript still gets motion.
+- Linked axes: an axis without a script can **follow** another, e.g. twist mirroring stroke: when
+  stroke goes 0-100%, twist goes 0-100% of its own range, in step. Use the follower's Invert to
+  reverse it.
 - Settings live in a dialog built from Stash's own components, so it matches Stash and any custom theme.
 - Heart-rate modulation, adaptive ceiling decay and climax markers (below).
 - A stats overlay on the video: heart rate, ceiling, edges and what the limiter is doing.
@@ -146,6 +149,7 @@ node tests/governor.test.js
 node tests/hr-packets.test.js
 node tests/serial.test.js
 node tests/include.test.js
+node tests/linked.test.js
 ```
 
 ### Releasing
