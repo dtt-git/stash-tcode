@@ -665,10 +665,11 @@ function buildAxisGroup(card, axis){
     var speedRow;
     uiSetting(group, "Speed limit", "Cap how fast this axis moves. Faster moves are shortened so they stay in sync with the video.",
         uiSwitch('speedLimit' + axis, cfg.speedLimit, function(v){ cfg.speedLimit = v; speedRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
-    var speedFormat = function(v){ return v.toFixed(2) + " u/s · " + (1 / v).toFixed(3) + " s/unit"; };
-    speedRow = uiSetting(group, "Max speed", "1 unit is a full 0–100% move, so 1 u/s is the full travel in one second.",
-        uiRange('maxSpeed' + axis, cfg.maxSpeed, {min: MAX_SPEED_MIN, max: MAX_SPEED_MAX, step: 0.25, format: speedFormat}, null,
-                function(v){ cfg.maxSpeed = v; saveSettings(); }).el, {sub: true, disabled: !cfg.speedLimit});
+    // Stored as full travels per second (cfg.maxSpeed); shown as % of full travel per second.
+    speedRow = uiSetting(group, "Max speed", "How much of its full travel this axis may cover per second.",
+        uiRange('maxSpeed' + axis, Math.round(cfg.maxSpeed * 100), {min: MAX_SPEED_MIN * 100, max: MAX_SPEED_MAX * 100, step: 25,
+                format: function(v){ return v + "%/s"; }}, null,
+                function(v){ cfg.maxSpeed = v / 100; saveSettings(); }).el, {sub: true, disabled: !cfg.speedLimit});
     uiSetting(group, "Auto home", "Rest at the middle of the range. Turn off to choose the home position.",
         uiSwitch('autoCenter' + axis, cfg.autoCenter !== false, function(v){
             cfg.autoCenter = v;
@@ -1982,9 +1983,9 @@ function autoMotion(axis, ms, jumped, a){
 // ---------------------------------
 
 // --- SPEED LIMIT ---
-// Caps how fast an axis may travel, per axis, in units per second (u/s) as MultiFunPlayer
-// uses them: 1 unit is a full 0-100% move (0-9999 in TCode), so 1 u/s is the full travel
-// in one second. A move that would be faster has its end pulled back toward where the
+// Caps how fast an axis may travel, per axis. The limit is stored in full travels per
+// second (1 = the whole 0-9999 range in one second; MultiFunPlayer's "u/s") and shown as
+// % of full travel per second. A move that would be faster has its end pulled back toward where the
 // axis is, so it fits in the same time. Timing never changes, so playback stays in sync,
 // and the next move starts from the clipped point.
 
