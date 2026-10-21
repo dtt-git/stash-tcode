@@ -116,6 +116,7 @@ function loadSettings(){
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
+                           "hr": { deviceId: null, deviceName: null },
                            "currentVersion": thisVersion};
     settings = GM_getValue("settings", defaultSettings);
     handleUpgrade(thisVersion);
@@ -384,13 +385,11 @@ function injectNavStyles(){
         #tcode-nav-btn { display: flex; align-items: center; }
         #tcode-nav-btn .tcode-nav-dot {
             display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-            margin-right: 6px; flex-shrink: 0;
-            background: #f87171; box-shadow: 0 0 4px rgba(248,113,113,0.9);
-            transition: background 0.2s ease, box-shadow 0.2s ease;
+            margin-right: 6px; flex-shrink: 0; background: #db3737;
+            transition: background 0.2s ease;
         }
-        #tcode-nav-btn.connected .tcode-nav-dot {
-            background: #4ade80; box-shadow: 0 0 4px rgba(74,222,128,0.9);
-        }
+        #tcode-nav-btn.connected .tcode-nav-dot { background: #0f9960; }
+        #tcode-nav-btn .tcode-nav-hr { margin-left: 8px; font-variant-numeric: tabular-nums; }
     `;
     document.head.appendChild(s);
 }
@@ -429,11 +428,13 @@ function injectNavButton(){
     // own nav-utility styling, so it sits flush with its neighbors.
     btn.className = 'nav-utility minimal d-flex align-items-center h-100 btn btn-primary';
     btn.innerHTML = '<span class="tcode-nav-dot"></span>' +
-        '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span>';
+        '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span>' +
+        '<span class="tcode-nav-hr" style="display: none"></span>';
     btn.addEventListener('click', function(){ toggleMenu(); });
 
     navButtons.appendChild(btn); // very end of the cluster
     updateNavButton();
+    updateHrUi();
 }
 
 // Stash is a React SPA and re-renders the navbar on navigation, which can drop our button.
@@ -559,6 +560,23 @@ function buildDeviceTab(body){
     uiSetting(card, "Reconnect automatically", "Reopen the device on page load, and when it's plugged back in.",
         uiSwitch('autoConnect', settings.autoConnect !== false, function(v){ settings.autoConnect = v; saveSettings(); }));
 
+    var hrCard = uiSection(body, "Heart rate monitor");
+    var hrButton;
+    if(hr.status === 'live' || hr.status === 'connecting' || hr.status === 'reconnecting'){
+        hrButton = uiButton("Disconnect", "secondary", disconnectHr);
+    }else if(settings.hr.deviceId && !hrCanAutoReconnect()){
+        hrButton = uiButton("Reconnect", "primary", connectHr);
+    }else{
+        hrButton = uiButton("Connect", "primary", connectHr);
+    }
+    var hrRow = uiSetting(hrCard, "Monitor", null, hrButton);
+    hrRow.firstChild.appendChild(el('div', {class: 'sub-heading'}, [
+        el('span', {class: 'tcode-status'}, [el('span', {class: 'tcode-dot' + (hrLive() ? ' on' : ''), id: 'tcode-hr-dot'}),
+                                             el('span', {id: 'tcode-hr-status', text: hrStatusText()})])
+    ]));
+    hrRow.firstChild.appendChild(el('div', {class: 'sub-heading',
+        text: "Any Bluetooth monitor with the standard heart-rate service: chest straps, or watches broadcasting HR."}));
+
     var play = uiSection(body, "Playback");
     uiSetting(play, "Sync offset", "Shifts the script against the video. Positive plays strokes earlier.",
         uiRange('sync', parseInt(settings.sync) || 0, {min: -250, max: 250, origin: 0, format: ms}, null,
@@ -648,6 +666,13 @@ function buildAdvancedTab(body){
         uiSetting(dbg, "Simulated device", "Stands in for a TCode device: commands are recorded, nothing is sent.",
             uiButton(simulatedDevice ? "Running" : "Start", "secondary", function(){ connectSimulatedDevice(); renderActiveTab(); },
                      {disabled: serialConnected}));
+        var simOn = hr.source === 'sim';
+        uiSetting(dbg, "Simulate heart rate", "Feeds a steady reading once a second in place of a monitor.",
+            uiSwitch('hrSim', simOn, function(v){ if(v){ startHrSim(); } else { stopHrSim(); } renderActiveTab(); }));
+        var simRange = uiRange('hrSimBpm', hrSimBpm, {min: 40, max: 200, format: function(v){ return v + " BPM"; }},
+            function(v){ hrSimBpm = v; if(hr.source === 'sim'){ feedHr(v, true); } }, null);
+        simRange.setDisabled(!simOn);
+        uiSetting(dbg, "Simulated BPM", null, simRange.el, {sub: true, disabled: !simOn});
     }
 }
 
@@ -790,6 +815,233 @@ function sendTCode(data) {
 
 // ---------------------------------
 
+// --- HEART RATE MONITOR (Web Bluetooth) ---
+// Any sensor exposing the standard Bluetooth Heart Rate service (0x180D): chest straps,
+// and watches that broadcast HR. Readings land in `hr`; the governor reads from there.
+
+var hr = {
+    bpm: null,          // last valid reading
+    at: 0,              // Date.now() of that reading
+    contact: null,      // true/false if the sensor reports skin contact, else null
+    status: 'off',      // off | connecting | live | reconnecting | lost
+    source: null,       // 'ble' | 'sim'
+    device: null,
+    characteristic: null,
+    battery: null,
+    retry: 0,
+    manualDisconnect: false
+};
+var HR_MIN_VALID = 35;                  // anything lower is a bad read, not a heartbeat
+var HR_RETRY_MS = [1000, 2000, 4000];   // reconnect attempts after an unexpected drop
+var hrSimTimer = null;
+var hrSimBpm = 80;
+
+// Decode a Heart Rate Measurement value (GATT 0x2A37). Byte 0 is flags: bit 0 picks a
+// uint8 or uint16 BPM, bits 1-2 report skin contact (0b11 contact, 0b10 none, else
+// unsupported). Returns null when the value is too short to hold a reading.
+function parseHrMeasurement(view){
+    if(!view || view.byteLength < 2){ return null; }
+    var flags = view.getUint8(0);
+    var wide = (flags & 0x01) === 0x01;
+    if(wide && view.byteLength < 3){ return null; }
+    var bpm = wide ? view.getUint16(1, true) : view.getUint8(1);
+    var contactBits = (flags >> 1) & 0x03;
+    var contact = contactBits === 0x03 ? true : (contactBits === 0x02 ? false : null);
+    return { bpm: bpm, contact: contact };
+}
+
+// The single entry point for a new reading, from the monitor or the simulator.
+function feedHr(bpm, contact){
+    hr.bpm = bpm;
+    hr.at = Date.now();
+    hr.contact = contact;
+    updateHrUi();
+}
+
+function hrLive(){ return hr.status === 'live' && hr.bpm != null; }
+
+function onHrValue(e){
+    var m = parseHrMeasurement(e.target.value);
+    if(!m){ return; }
+    if(m.bpm < HR_MIN_VALID){ hr.contact = m.contact; return; }
+    feedHr(m.bpm, m.contact);
+}
+
+// Pick a monitor (needs a click) and connect to it.
+async function connectHr(){
+    if(!navigator.bluetooth){
+        showToast("Bluetooth Unavailable", "Web Bluetooth needs Chrome or Edge, and a secure origin (https, localhost, or the insecure-origins flag).", "error", 8000);
+        return;
+    }
+    var device;
+    try {
+        device = await navigator.bluetooth.requestDevice({ filters: [{ services: ['heart_rate'] }], optionalServices: ['battery_service'] });
+    } catch(e) {
+        if(e.name !== 'NotFoundError'){ showToast("Heart Rate Failed", e.message, "error"); } // NotFoundError = picker cancelled
+        return;
+    }
+    await attachHrDevice(device, false);
+}
+
+async function attachHrDevice(device, silent){
+    if(hr.device && hr.device !== device){ hr.device.removeEventListener('gattserverdisconnected', onHrDropped); }
+    stopHrSim();
+    hr.device = device;
+    hr.manualDisconnect = false;
+    device.removeEventListener('gattserverdisconnected', onHrDropped);
+    device.addEventListener('gattserverdisconnected', onHrDropped);
+    settings.hr.deviceId = device.id;
+    settings.hr.deviceName = device.name || "Heart rate monitor";
+    saveSettings();
+    return openHrGatt(silent);
+}
+
+async function openHrGatt(silent){
+    var device = hr.device;
+    if(!device){ return false; }
+    setHrStatus(hr.status === 'reconnecting' ? 'reconnecting' : 'connecting');
+    try {
+        var server = await device.gatt.connect();
+        var service = await server.getPrimaryService('heart_rate');
+        var ch = await service.getCharacteristic('heart_rate_measurement');
+        if(hr.characteristic && hr.characteristic !== ch){ hr.characteristic.removeEventListener('characteristicvaluechanged', onHrValue); }
+        ch.removeEventListener('characteristicvaluechanged', onHrValue);
+        ch.addEventListener('characteristicvaluechanged', onHrValue);
+        await ch.startNotifications();
+        hr.characteristic = ch;
+        hr.source = 'ble';
+        hr.retry = 0;
+        setHrStatus('live');
+        readHrBattery(server);
+        showToast(silent ? "Heart Rate Reconnected" : "Heart Rate Connected", settings.hr.deviceName, "success");
+        return true;
+    } catch(e) {
+        console.error("[TCode] Heart rate connect failed:", e);
+        if(!silent){ showToast("Heart Rate Failed", e.message, "error"); }
+        if(hr.status !== 'reconnecting'){ setHrStatus('off'); }
+        return false;
+    }
+}
+
+async function readHrBattery(server){
+    try {
+        var svc = await server.getPrimaryService('battery_service');
+        var ch = await svc.getCharacteristic('battery_level');
+        hr.battery = (await ch.readValue()).getUint8(0);
+        updateHrUi();
+    } catch(e) { hr.battery = null; } // battery service is optional
+}
+
+// The link dropped without us asking: retry on a short backoff before calling it lost.
+function onHrDropped(){
+    if(hr.manualDisconnect || hr.source !== 'ble'){ return; }
+    hr.retry = 0;
+    setHrStatus('reconnecting');
+    retryHr();
+}
+
+function retryHr(){
+    if(hr.manualDisconnect || hr.status !== 'reconnecting'){ return; }
+    if(hr.retry >= HR_RETRY_MS.length){
+        setHrStatus('lost');
+        showToast("Heart Rate Lost", (settings.hr.deviceName || "Monitor") + " stopped responding", "warning", 6000);
+        return;
+    }
+    var delay = HR_RETRY_MS[hr.retry++];
+    setTimeout(async function(){
+        if(await openHrGatt(true)){ return; }
+        retryHr();
+    }, delay);
+}
+
+function disconnectHr(){
+    stopHrSim();
+    hr.manualDisconnect = true;
+    if(hr.device){
+        try { hr.device.gatt.disconnect(); } catch(e) {}
+    }
+    hr.source = null;
+    hr.bpm = null;
+    hr.battery = null;
+    setHrStatus('off');
+}
+
+// Reconnect the remembered monitor without the picker. Chrome only lists previously
+// granted devices through getDevices(), which isn't available everywhere; when it's
+// missing the Device tab offers a one-click reconnect instead.
+async function autoConnectHr(){
+    if(!navigator.bluetooth || typeof navigator.bluetooth.getDevices !== 'function' || !settings.hr.deviceId){ return; }
+    var devices;
+    try { devices = await navigator.bluetooth.getDevices(); } catch(e) { return; }
+    var device = devices.find(function(d){ return d.id === settings.hr.deviceId; });
+    if(!device){ return; }
+    if(await attachHrDevice(device, true)){ return; }
+    // Not reachable yet (asleep, out of range): wait for it to advertise, then connect.
+    if(typeof device.watchAdvertisements !== 'function'){ return; }
+    var abort = new AbortController();
+    device.addEventListener('advertisementreceived', function(){
+        abort.abort();
+        if(hr.status !== 'live'){ attachHrDevice(device, true); }
+    }, { once: true });
+    try { await device.watchAdvertisements({ signal: abort.signal }); } catch(e) { debug("[TCode] watchAdvertisements: " + e); }
+}
+
+function hrCanAutoReconnect(){
+    return !!(navigator.bluetooth && typeof navigator.bluetooth.getDevices === 'function');
+}
+
+// ---- simulator (debug) ----
+// Feeds a steady reading once a second, the cadence of a real strap, so everything
+// downstream (including the signal watchdog) behaves as it would with a monitor.
+function startHrSim(bpm){
+    if(bpm != null){ hrSimBpm = bpm; }
+    if(hr.source === 'ble'){ disconnectHr(); }
+    hr.manualDisconnect = false;
+    hr.source = 'sim';
+    setHrStatus('live');
+    feedHr(hrSimBpm, true);
+    if(!hrSimTimer){ hrSimTimer = setInterval(function(){ feedHr(hrSimBpm, true); }, 1000); }
+}
+
+function stopHrSim(){
+    if(hrSimTimer){ clearInterval(hrSimTimer); hrSimTimer = null; }
+    if(hr.source === 'sim'){ hr.source = null; hr.bpm = null; setHrStatus('off'); }
+}
+
+// ---- UI hooks ----
+function setHrStatus(status){
+    hr.status = status;
+    updateHrUi();
+    refreshSettingsTab('device');
+}
+
+function hrStatusText(){
+    var name = settings.hr.deviceName || "Monitor";
+    switch(hr.status){
+        case 'live': return (hr.source === 'sim' ? "Simulated" : name) + (hr.bpm != null ? " · " + hr.bpm + " BPM" : "") +
+                            (hr.battery != null ? " · battery " + hr.battery + "%" : "") + (hr.contact === false ? " · no skin contact" : "");
+        case 'connecting': return "Connecting to " + name + "…";
+        case 'reconnecting': return "Reconnecting to " + name + "…";
+        case 'lost': return name + " lost";
+        default: return "Not connected";
+    }
+}
+
+// Cheap live updates (nav readout, status line) without re-rendering the dialog.
+function updateHrUi(){
+    var navHr = document.querySelector('#tcode-nav-btn .tcode-nav-hr');
+    if(navHr){
+        navHr.textContent = hrLive() ? "♥ " + hr.bpm : "";
+        navHr.style.display = hrLive() ? "" : "none";
+    }
+    var line = document.getElementById('tcode-hr-status');
+    if(line){ line.textContent = hrStatusText(); }
+    var dot = document.getElementById('tcode-hr-dot');
+    if(dot){ dot.classList.toggle('on', hrLive()); }
+}
+
+// ---------------------------------
+
 // --- DEBUG TOOLS ---
 // Only active with Debug on (Advanced tab). Tampermonkey runs this script in an isolated
 // world, so the hooks are published on the page window as window.__tcode for the console.
@@ -838,6 +1090,10 @@ function publishDebugApi(){
         tx: function(){ return txLog.slice(); },
         clearTx: function(){ txLog.length = 0; },
         simulateDevice: connectSimulatedDevice,
+        // Simulated heart rate: setHr(bpm) starts or updates it, setHr(null) stops it.
+        setHr: function(bpm){ if(bpm == null){ stopHrSim(); } else { startHrSim(bpm); } },
+        hr: function(){ return { bpm: hr.bpm, at: hr.at, ageMs: hr.at ? Date.now() - hr.at : null, contact: hr.contact,
+                                 status: hr.status, source: hr.source, battery: hr.battery }; },
         state: function(){
             var axes = {};
             for(var ax in AXIS){
@@ -1470,4 +1726,5 @@ function waitForPageChange(){
 publishDebugApi();
 startNavButton();
 startSerialAutoConnect();
+autoConnectHr();
 waitForPageChange();
