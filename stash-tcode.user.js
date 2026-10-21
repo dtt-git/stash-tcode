@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Stash-TCode
 // @namespace    https://github.com/dtt-git/stash-tcode
-// @version      0.5.18
-// @description  Integrate TCode Devices with Stash via USB Web Serial
+// @version      0.6.0
+// @description  Drive TCode devices from Stash over USB Web Serial, with optional heart-rate modulation
 // @author       dtt (originally by Steel, modded by Spunkle)
 // @include      http*://*:9999*
 // @grant        GM_xmlhttpRequest
