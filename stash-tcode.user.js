@@ -112,7 +112,7 @@ function saveSettings(){
 function loadSettings(){
     var thisVersion = GM_info.script.version;
     var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true}; };
-    var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null,
+    var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true,
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
@@ -660,6 +660,8 @@ function buildAxisGroup(card, axis){
 // ---- Advanced tab ----
 function buildAdvancedTab(body){
     var card = uiSection(body, "Advanced");
+    uiSetting(card, "Stats overlay", "Heart rate, ceiling, edges and the current phase over the video, while a monitor is connected or modulation is on.",
+        uiSwitch('showHud', settings.showHud !== false, function(v){ settings.showHud = v; saveSettings(); updateHud(); }));
     uiSetting(card, "Notifications", "Show pop-ups for connections and script loading.",
         uiSwitch('showNotifications', settings.showNotifications !== false, function(v){ settings.showNotifications = v; saveSettings(); }));
     uiSetting(card, "Debug mode", "Log details to the console and show the debug tools below.",
@@ -1217,6 +1219,144 @@ function publishDebugApi(){
                      settings: JSON.parse(JSON.stringify(settings)) };
         }
     };
+}
+
+// ---------------------------------
+
+// --- STATS OVERLAY ---
+// A small panel over the video: heart rate, ceiling, edges, the governor's phase and
+// allowance, and the next climax marker. It lives inside the video.js container so it
+// stays visible in fullscreen, ignores the mouse, and refreshes at 4 Hz.
+
+var hudTimer = null;
+var HUD_COLORS = { ok: "#3dcc91", warn: "#ffb366", stop: "#ff7373", climax: "#48aff0", off: "#bfccd6" };
+
+function injectHudStyles(){
+    if(document.getElementById('tcode-hud-styles')){ return; }
+    var s = document.createElement('style');
+    s.id = 'tcode-hud-styles';
+    s.textContent = `
+#tcode-hud { position: absolute; top: 12px; left: 12px; z-index: 2; pointer-events: none; user-select: none;
+             min-width: 170px; padding: 8px 10px; border-radius: 4px; background: rgba(16, 22, 26, .62);
+             color: #f5f8fa; font-size: 12px; line-height: 1.35; font-variant-numeric: tabular-nums;
+             text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+#tcode-hud .hud-top { display: flex; align-items: baseline; gap: 6px; }
+#tcode-hud .hud-heart { font-size: 14px; display: inline-block; animation: tcode-beat 1s ease-in-out infinite; }
+#tcode-hud .hud-bpm { font-size: 22px; font-weight: 600; }
+#tcode-hud .hud-ceiling { color: #bfccd6; }
+#tcode-hud .hud-decay { color: #ffb366; font-size: 11px; }
+#tcode-hud .hud-label { font-weight: 600; letter-spacing: .03em; }
+#tcode-hud .hud-bar { height: 4px; margin: 4px 0 5px; border-radius: 2px; background: rgba(245,248,250,.18); overflow: hidden; }
+#tcode-hud .hud-fill { height: 100%; width: 0; transition: width .2s linear, background-color .2s; }
+#tcode-hud .hud-meta { display: flex; align-items: center; gap: 8px; color: #bfccd6; font-size: 11px; }
+#tcode-hud .hud-dots { margin-left: auto; display: inline-flex; gap: 4px; }
+#tcode-hud .hud-dot { width: 6px; height: 6px; border-radius: 50%; background: #ff7373; }
+#tcode-hud .hud-dot.on { background: #3dcc91; }
+@keyframes tcode-beat { 0%, 60%, 100% { transform: scale(1); } 20% { transform: scale(1.25); } }
+`;
+    document.head.appendChild(s);
+}
+
+function hudWanted(){
+    return settings.showHud !== false && !!boundPlayer && (hrLive() || settings.hr.enabled);
+}
+
+// The HUD element, created inside the current player's container (and moved if Stash
+// swapped the player). Null when there's nothing to attach to.
+function ensureHud(){
+    var hud = document.getElementById('tcode-hud');
+    var host = boundPlayer && boundPlayer.parentNode;
+    if(!host){ if(hud){ hud.remove(); } return null; }
+    if(hud && hud.parentNode !== host){ hud.remove(); hud = null; }
+    if(!hud){
+        injectHudStyles();
+        hud = el('div', {id: 'tcode-hud', 'aria-hidden': 'true'}, [
+            el('div', {class: 'hud-top'}, [
+                el('span', {class: 'hud-heart', text: '♥'}),
+                el('span', {class: 'hud-bpm'}),
+                el('span', {class: 'hud-ceiling'}),
+                el('span', {class: 'hud-decay'})
+            ]),
+            el('div', {class: 'hud-label'}),
+            el('div', {class: 'hud-bar'}, [el('div', {class: 'hud-fill'})]),
+            el('div', {class: 'hud-meta'}, [
+                el('span', {class: 'hud-edges'}),
+                el('span', {class: 'hud-climax'}),
+                el('span', {class: 'hud-dots'}, [el('span', {class: 'hud-dot usb', title: 'Device'}), el('span', {class: 'hud-dot hr', title: 'Heart rate'})])
+            ])
+        ]);
+        host.appendChild(hud);
+    }
+    return hud;
+}
+
+function phaseColor(g){
+    if(!g){ return HUD_COLORS.off; }
+    switch(g.phase){
+        case 'EDGE': case 'NO SIGNAL': return HUD_COLORS.stop;
+        case 'EASING': case 'REJOINING': return HUD_COLORS.warn;
+        case 'CLIMAX': return HUD_COLORS.climax;
+        case 'FREE': return HUD_COLORS.ok;
+        default: return HUD_COLORS.off;
+    }
+}
+
+// Time to the next climax marker ahead of the playhead, or "".
+function nextClimaxText(sceneMs){
+    if(sceneMs == null){ return ""; }
+    var ahead = climaxMarksMs.map(function(m){ return m.at; }).filter(function(at){ return at > sceneMs; });
+    if(!ahead.length){ return ""; }
+    return "Climax in " + formatTime((Math.min.apply(null, ahead) - sceneMs) / 1000);
+}
+
+function q(hud, sel){ return hud.querySelector(sel); }
+
+function updateHud(){
+    if(!hudWanted()){
+        var stale = document.getElementById('tcode-hud');
+        if(stale){ stale.remove(); }
+        return;
+    }
+    var hud = ensureHud();
+    if(!hud){ return; }
+    var g = lastGov;
+    var modulating = settings.hr.enabled && g && g.phase !== 'OFF';
+    var color = modulating ? phaseColor(g) : HUD_COLORS.off;
+
+    q(hud, '.hud-bpm').textContent = hr.bpm != null && hrLive() ? hr.bpm : "--";
+    var heart = q(hud, '.hud-heart');
+    heart.style.color = color;
+    heart.style.animationDuration = hrLive() && hr.bpm ? (60 / hr.bpm).toFixed(2) + 's' : '0s';
+    q(hud, '.hud-ceiling').textContent = modulating && g.ceiling != null ? "/ " + g.ceiling : "";
+    q(hud, '.hud-decay').textContent = modulating && g.decay ? "−" + g.decay : "";
+
+    var label = q(hud, '.hud-label');
+    label.textContent = modulating ? g.label : (hrLive() ? "Modulation off" : "No monitor");
+    label.style.color = color;
+    var bar = q(hud, '.hud-bar');
+    bar.style.display = modulating ? "" : "none";
+    if(modulating){
+        var fill = q(hud, '.hud-fill');
+        fill.style.width = Math.round(g.a * 100) + "%";
+        fill.style.backgroundColor = color;
+    }
+
+    q(hud, '.hud-edges').textContent = modulating ? hrSession.edges + (hrSession.edges === 1 ? " edge" : " edges") : "";
+    q(hud, '.hud-climax').textContent = modulating && g.phase !== 'CLIMAX' ? nextClimaxText(currentSceneMs()) : "";
+    q(hud, '.hud-dot.usb').classList.toggle('on', serialConnected);
+    q(hud, '.hud-dot.hr').classList.toggle('on', hrLive());
+}
+
+function startHud(){
+    if(hudTimer){ return; }
+    hudTimer = setInterval(function(){
+        try {
+            // Keep the governor current while paused too (watchdog, edges, the dialog's
+            // session line); during playback currentAction refreshes it on every tick.
+            if(!boundPlayer || boundPlayer.paused){ refreshGovernor(); } else { updateGovUi(); }
+            updateHud();
+        } catch(e) { debug("[TCode] HUD update failed: " + e); }
+    }, 250);
 }
 
 // ---------------------------------
@@ -2175,4 +2315,5 @@ startSerialAutoConnect();
 autoConnectHr();
 startClimaxPolling();
 startPlayerWatch();
+startHud();
 waitForPageChange();
