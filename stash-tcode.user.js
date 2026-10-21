@@ -197,6 +197,7 @@ function saveSettings(saveToDevice=true){
         }
     }
     GM_setValue("settings", settings);
+    publishDebugApi();
 }
 
 function loadSettings(){
@@ -1076,7 +1077,72 @@ async function readSerialLoop() {
 }
 
 function sendTCode(data) {
-    if (serialConnected && writer) { writer.write(data); }
+    if (serialConnected && writer) {
+        writer.write(data);
+        if (settings.debug) { recordTx(data); }
+    }
+}
+
+// ---------------------------------
+
+// --- DEBUG TOOLS ---
+// Only active with Debug on (Advanced tab). Tampermonkey runs this script in an isolated
+// world, so the hooks are published on the page window as window.__tcode for the console.
+
+var txLog = []; // [{t, data}] -- every chunk written to the device, newest last
+var TX_LOG_MAX = 5000;
+var simulatedDevice = false;
+
+function recordTx(data){
+    txLog.push({ t: Math.round(performance.now()), data: data });
+    if(txLog.length > TX_LOG_MAX){ txLog.splice(0, txLog.length - TX_LOG_MAX); }
+}
+
+// Pretend a device is connected: commands are recorded but go nowhere, and the D2 limits
+// query is answered locally, so playback can be exercised without the hardware moving.
+function connectSimulatedDevice(){
+    if(serialConnected){ return; }
+    simulatedDevice = true;
+    writer = {
+        write: function(data){
+            if(String(data).indexOf("D2") !== -1){
+                setTimeout(function(){
+                    processWSReply({ data: "L0 0 9999\nL1 0 9999\nL2 0 9999\nR0 0 9999\nR1 0 9999\nR2 0 9999\n" });
+                }, 20);
+            }
+            return Promise.resolve();
+        }
+    };
+    serialConnected = true;
+    showToast("Simulated Device", "Commands are recorded, nothing is sent", "info");
+    updateNavButton();
+}
+
+function publishDebugApi(){
+    if(!settings.debug){ return; }
+    unsafeWindow.__tcode = {
+        // Axis commands as [{t, axis, pos, ms}], parsed from the TX log.
+        commands: function(){
+            var out = [];
+            for(var e of txLog){
+                var re = /([LR]\d)(\d{4})I(\d+)/g, m;
+                while((m = re.exec(e.data))){ out.push({ t: e.t, axis: m[1], pos: +m[2], ms: +m[3] }); }
+            }
+            return out;
+        },
+        tx: function(){ return txLog.slice(); },
+        clearTx: function(){ txLog.length = 0; },
+        simulateDevice: connectSimulatedDevice,
+        state: function(){
+            var axes = {};
+            for(var ax in AXIS){
+                axes[ax] = { limits: AXIS[ax].limits, loaded: !!AXIS[ax].scriptLoaded,
+                             acts: AXIS[ax].acts ? AXIS[ax].acts.length : 0, enabled: !!(settings.axes[ax] && settings.axes[ax].enabled) };
+            }
+            return { connected: serialConnected, simulated: simulatedDevice, axes: axes,
+                     settings: JSON.parse(JSON.stringify(settings)) };
+        }
+    };
 }
 
 // ---------------------------------
@@ -1836,5 +1902,6 @@ function waitForPageChange(){
     setTimeout(waitForPageChange, 500);
 }
 
+publishDebugApi();
 startNavButton();
 waitForPageChange();
