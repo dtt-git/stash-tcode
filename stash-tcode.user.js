@@ -1,11 +1,10 @@
 // ==UserScript==
 // @name         Stash-TCode
 // @namespace    https://github.com/dtt-git/stash-tcode
-// @version      0.5.18
-// @description  Integrate TCode Devices with Stash via USB Web Serial
+// @version      0.6.0
+// @description  Drive TCode devices from Stash over USB Web Serial, with optional heart-rate modulation
 // @author       dtt (originally by Steel, modded by Spunkle)
-// @include      http*://*:9999*
-// @grant        GM_xmlhttpRequest
+// @include      /^https?:\/\/[^\/?#]+:9999\//
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_info
@@ -19,8 +18,6 @@
 
 var video="";
 var lastPage = null;
-
-var pendingKey = null;
 
 var settings = loadSettings();
 
@@ -38,9 +35,8 @@ var bufferTimeout = null;
 // ------------------------
 
 var scriptList = null;
+var scriptListRequest = null;   // the in-flight Interactive Tools lookup, shared by all axes
 var AXIS = new Object();
-var adjustMin = false; // 0 = Max 1= Min
-var scrollWheelEnabled = false; // Only enabled when minKey or initialKey is held
 var pending = false;
 var msPending = false;
 var lastActionMs = null;          // last playhead position we served, for seek detection
@@ -48,15 +44,12 @@ var SEEK_THRESHOLD_MS = 1000;     // forward jump beyond this is treated as a se
 var boundPlayer = null;           // the <video> our listeners are currently attached to
 var lastSrc = null;               // last media source seen, for transcode offset caching
 var streamOffsetMs = 0;           // scene-time offset of the current stream (transcode)
-var mouseEnabled = true;
 var videoPlayerLoaded = false;
 var saveLimitsTimeout = null; // debounce handle for persisting axis ranges
 var limitsReady = false; // true once saved ranges are restored; gates persistence so startup can't overwrite storage
-var listenersAttached = false; // guards init() so document-level key/wheel listeners attach only once
 const BOTH = 0;
 const LOWER = 1;
 const UPPER = 2;
-const isChrome = !!unsafeWindow.chrome;
 
 function isNewerVersion (oldVer, newVer) {
     const oldParts = oldVer.split('.')
@@ -111,502 +104,303 @@ function persistLimitsSoon(){
     }, 300);
 }
 
-function settingsMenuApplySaved(){
-    for(const setting in settings){
-        if(setting == "axes"){
-            for (const axis in settings.axes){
-                var axisCheck = document.querySelector('#enable' + axis);
-                if(axisCheck && settings.axes[axis].enabled){
-                    axisCheck.checked = true;
-                    var group = axisCheck.closest('.control-group');
-                    var parentContainer = group ? group.querySelector('.dual-slider-container') : null;
-                    if(parentContainer){ parentContainer.classList.remove('disabled'); }
-                    var homeRow = group ? group.querySelector('.control-row-secondary') : null;
-                    if(homeRow){ homeRow.classList.remove('disabled'); }
-                }
-                var randomCheck = document.querySelector('#random' + axis);
-                if(randomCheck){
-                    if(settings.axes[axis].random == ""){ continue; }
-                    randomCheck.checked = true;
-                    var trackedAxis = document.querySelector('#track' + axis);
-                    if(trackedAxis){ trackedAxis.value = settings.axes[axis].random; }
-                }
-                var invertCheck = document.querySelector('#invert' + axis);
-                if(invertCheck && settings.axes[axis].invert){ invertCheck.checked = true; }
-                var autoCenterCheck = document.querySelector('#autoCenter' + axis);
-                if(autoCenterCheck){ autoCenterCheck.checked = (settings.axes[axis].autoCenter !== false); }
-            }
-            continue;
-        }
-        var input = document.querySelector('#' + setting);
-        if(input){
-            if(input.type == "checkbox"){
-                if(JSON.parse(settings[setting])){ input.checked = true; }
-            }else if(input.type == "text" || input.type == "range"){
-                input.value = settings[setting];
-            }
-        }
-    }
-}
-
-function saveSettings(saveToDevice=true){
-    for(const setting in settings){
-        if(setting == "axes"){
-            for (const axis in settings.axes){
-                var axisCheck = document.querySelector('#enable' + axis);
-                if(axisCheck){ settings.axes[axis].enabled = axisCheck.checked; }
-                var randomCheck = document.querySelector('#random' + axis);
-                if(randomCheck){
-                    if(!randomCheck.checked){
-                        settings.axes[axis].random = "";
-                    }else{
-                        var trackedAxis = document.querySelector('#track' + axis);
-                        if(trackedAxis){ settings.axes[axis].random = trackedAxis.value; }
-                    }
-                }
-                var invertCheck = document.querySelector('#invert' + axis);
-                if(invertCheck){ settings.axes[axis].invert = invertCheck.checked; }
-                var autoCenterCheck = document.querySelector('#autoCenter' + axis);
-                if(autoCenterCheck){ settings.axes[axis].autoCenter = autoCenterCheck.checked; }
-                var centerInput = document.querySelector('#center' + axis);
-                if(centerInput && autoCenterCheck && !autoCenterCheck.checked){
-                    settings.axes[axis].center = parseInt(centerInput.value);
-                }
-                // Persist the axis range so it survives refreshes.
-                // (Runs for every axis now, regardless of the Random checkbox state.)
-                if(AXIS[axis] && AXIS[axis].limits != null){
-                    settings.axes[axis].limits = [AXIS[axis].limits[0], AXIS[axis].limits[1]];
-                }
-            }
-            continue;
-        }
-        var input = document.querySelector('#' + setting);
-        if(input){
-            if(input.type == "checkbox"){
-                if(input.checked){ settings[setting] = true; }else{ settings[setting] = false; }
-            }else if(input.type == "text" || input.type == "range"){
-                settings[setting] = input.value;
-            }
-        }
-    }
-    if(saveToDevice){
-        for(const axis of listAxes()){
-            var min = document.querySelector('#min' + axis);
-            var max = document.querySelector('#max' + axis);
-            if(min && max){ setLimits(min.value, max.value, axis); }
-        }
-    }
+function saveSettings(){
     GM_setValue("settings", settings);
+    publishDebugApi();
 }
 
 function loadSettings(){
     var thisVersion = GM_info.script.version;
-    var defaultSettings = {"debug": false, "device": "", "initialKey": "Shift", "minKey": "Meta", "settingsKey": "F2", "syncKey": "z", "sync": 0,
+    var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5,
+                                                  speedLimit: false, maxSpeed: 5}; };
+    var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true, "knownAxes": [],
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
-                           "axes": { L0: {enabled: true, random: "", invert: false, center: null, autoCenter: true}, L1: {enabled: false, random: "", invert: false, center: null, autoCenter: true}, L2: {enabled: false, random: "", invert: false, center: null, autoCenter: true}, R0: {enabled: false, random: "", invert: false, center: null, autoCenter: true}, R1: {enabled: false, random: "", invert: false, center: null, autoCenter: true}, R2: {enabled: false, random: "", invert: false, center: null, autoCenter: true} },
+                           "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
+                                     R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
+                           "hr": { deviceId: null, deviceName: null, enabled: false,
+                                   edgeHr: 140, band: 10, floor: 30, rejoinSec: 8, timeoutSec: 8,
+                                   decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105,
+                                   climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15, climaxTag: "Climax" },
                            "currentVersion": thisVersion};
     settings = GM_getValue("settings", defaultSettings);
     handleUpgrade(thisVersion);
-    for(const setting in defaultSettings){
-        if(settings[setting] === undefined){ settings[setting] = defaultSettings[setting]; }
+    // "Climax HR" was renamed "Edge HR": it's where an edge is called, not a climax.
+    // Carry the old value over before defaults are filled in.
+    if(settings.hr && settings.hr.climaxHr != null){
+        if(settings.hr.edgeHr == null){ settings.hr.edgeHr = settings.hr.climaxHr; }
+        delete settings.hr.climaxHr;
     }
-    // Backfill per-axis keys added after the user's settings were first written, so
-    // upgrading doesn't leave center/autoCenter undefined on existing installs.
-    for(const ax in defaultSettings.axes){
-        if(!settings.axes[ax]){ settings.axes[ax] = Object.assign({}, defaultSettings.axes[ax]); continue; }
-        for(const k in defaultSettings.axes[ax]){
-            if(settings.axes[ax][k] === undefined){ settings.axes[ax][k] = defaultSettings.axes[ax][k]; }
+    // The speed limit started as one global setting (in full travels/s as "maxSpeed",
+    // then TCode units/s as "maxUnitsPerSec"). It's now per axis, in full travels/s like
+    // MultiFunPlayer. Carry a global setting onto every axis.
+    var globalLimit = settings.maxUnitsPerSec != null ? settings.maxUnitsPerSec / 9999
+                    : (settings.maxSpeed != null ? settings.maxSpeed : null);
+    if(settings.axes && (globalLimit != null || settings.speedLimit != null)){
+        for(const ax in settings.axes){
+            var a = settings.axes[ax];
+            if(a.maxSpeed == null && globalLimit != null){ a.maxSpeed = Math.round(globalLimit * 4) / 4; }
+            if(a.speedLimit == null){ a.speedLimit = !!settings.speedLimit; }
         }
     }
+    delete settings.speedLimit; delete settings.maxUnitsPerSec; delete settings.maxSpeed;
+    // Axes the device has reported before (see processLimits). Installs that have already
+    // connected a device have seen all of theirs, so their on/off choices stand.
+    if(settings.knownAxes === undefined){
+        settings.knownAxes = settings.serialPort ? ["L0", "L1", "L2", "R0", "R1", "R2"] : [];
+    }
+    backfillDefaults(settings, defaultSettings);
+    // Drop settings for features that no longer exist (hotkeys, random motion).
+    for(const gone of ["device", "initialKey", "minKey", "settingsKey", "syncKey"]){ delete settings[gone]; }
+    for(const ax in settings.axes){ delete settings.axes[ax].random; }
+    delete settings.hr.restingHr;
     return settings;
 }
 
-// --- TOAST NOTIFICATION SYSTEM ---
-var toastContainer = null;
-var toastQueue = [];
-var toastActive = false;
-
-function initToastContainer() {
-    if (toastContainer) return;
-    toastContainer = document.createElement('div');
-    toastContainer.id = 'tcode-toast-container';
-    toastContainer.style.cssText = `
-        position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-        z-index: 999999; display: flex; flex-direction: column-reverse; gap: 8px;
-        pointer-events: none; max-width: 90%; width: 400px;
-    `;
-    document.body.appendChild(toastContainer);
-
-    // Add toast styles
-    var toastStyles = document.createElement('style');
-    toastStyles.id = 'tcode-toast-styles';
-    toastStyles.textContent = `
-        .tcode-toast {
-            background: linear-gradient(135deg, rgba(26, 26, 46, 0.95) 0%, rgba(22, 33, 62, 0.95) 100%);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            padding: 14px 20px;
-            color: #fff;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            font-size: 14px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            animation: toastSlideIn 0.3s ease-out;
-            pointer-events: auto;
+// Fill in any key missing from `target`, recursing into nested objects, so settings
+// groups added after a user's settings were first written get their defaults on upgrade.
+// Arrays and null count as values, not groups.
+function backfillDefaults(target, defaults){
+    for(const k in defaults){
+        var d = defaults[k];
+        if(target[k] === undefined){
+            target[k] = (d && typeof d === "object" && !Array.isArray(d)) ? JSON.parse(JSON.stringify(d)) : d;
+        }else if(d && typeof d === "object" && !Array.isArray(d) && target[k] && typeof target[k] === "object"){
+            backfillDefaults(target[k], d);
         }
-        .tcode-toast.toast-success { border-left: 4px solid #4ade80; }
-        .tcode-toast.toast-info { border-left: 4px solid #60a5fa; }
-        .tcode-toast.toast-warning { border-left: 4px solid #fbbf24; }
-        .tcode-toast.toast-error { border-left: 4px solid #f87171; }
-        .tcode-toast .toast-icon {
-            font-size: 1.4em;
-            flex-shrink: 0;
-        }
-        .tcode-toast .toast-content {
-            flex: 1;
-        }
-        .tcode-toast .toast-title {
-            font-weight: 600;
-            margin-bottom: 2px;
-        }
-        .tcode-toast .toast-message {
-            opacity: 0.8;
-            font-size: 0.9em;
-        }
-        .tcode-toast.toast-exit {
-            animation: toastSlideOut 0.3s ease-in forwards;
-        }
-        @keyframes toastSlideIn {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes toastSlideOut {
-            from { opacity: 1; transform: translateY(0); }
-            to { opacity: 0; transform: translateY(-20px); }
-        }
-    `;
-    document.head.appendChild(toastStyles);
+    }
 }
 
+// --- UI TOOLKIT ---
+// Everything is built from Stash's own markup (Bootstrap 4 + its .setting-section/.setting
+// rows), so it picks up Stash's theme, including any custom CSS the user has installed.
+// The stylesheet below only covers layout details and the range sliders, which Stash
+// doesn't style.
+
+var STASH = { bg: "#202b33", card: "#30404d", input: "#394b59", accent: "#137cbd", text: "#f5f8fa",
+              muted: "#bfccd6", success: "#0f9960", warning: "#d9822b", danger: "#db3737" };
+
+function injectUiStyles(){
+    if(document.getElementById('tcode-ui-styles')){ return; }
+    var s = document.createElement('style');
+    s.id = 'tcode-ui-styles';
+    s.textContent = `
+#tcode-modal .modal-header { align-items: center; }
+#tcode-modal .modal-title { display: flex; align-items: center; gap: .5rem; }
+#tcode-modal .modal-body { padding-top: .5rem; }
+#tcode-modal .nav-tabs { margin: 0 0 1rem; }
+#tcode-modal .nav-tabs .nav-link { cursor: pointer; }
+#tcode-modal .setting-section h1 { font-size: 1.1rem; margin-bottom: .25rem; }
+#tcode-modal .setting-section > .sub-heading { color: ${STASH.muted}; margin: 0 0 .5rem; }
+#tcode-modal .setting-section:not(:first-child) { margin-top: 1.25rem; }
+#tcode-modal .setting { gap: 1rem; padding: 12px 15px; }
+#tcode-modal .setting > div:first-child { flex: 1 1 auto; min-width: 0; }
+#tcode-modal .setting > div:last-child { flex: 0 0 auto; min-width: 0; }
+#tcode-modal .setting h3 { font-size: 1rem; }
+#tcode-modal .setting .sub-heading { color: ${STASH.muted}; margin-top: .25rem; }
+#tcode-modal .setting.sub-setting { padding-left: 2rem; }
+#tcode-modal .setting.disabled > div:last-child { opacity: .5; pointer-events: none; }
+#tcode-modal .setting-group { padding-bottom: 0; }
+#tcode-modal .setting-group:not(:last-child) { border-bottom: 1px solid #000; }
+#tcode-modal .setting-group > .setting { border-bottom: none; }
+#tcode-modal .setting-group .setting { flex-wrap: nowrap; } /* Stash wraps grouped rows; keep controls beside their label */
+#tcode-modal .setting-group.collapsed > .setting:not(:first-child) { display: none; }
+#tcode-modal .modal-footer { justify-content: space-between; }
+#tcode-modal .tcode-version { color: ${STASH.muted}; font-size: .8rem; }
+#tcode-modal .tcode-number { width: 90px; text-align: right; display: inline-block; }
+#tcode-modal .tcode-suffix { margin-left: .4rem; color: ${STASH.muted}; }
+#tcode-modal .tcode-status { display: inline-flex; align-items: center; gap: .4rem; }
+#tcode-modal .tcode-dot { width: 8px; height: 8px; border-radius: 50%; background: ${STASH.danger}; display: inline-block; }
+#tcode-modal .tcode-dot.on { background: ${STASH.success}; }
+#tcode-modal .tcode-list { margin: .25rem 0 0; padding-left: 1.1rem; color: ${STASH.muted}; }
+
+/* Range sliders: thin track in the input colour, accent fill, light thumb. */
+.tcode-range { display: flex; align-items: center; gap: .6rem; width: 360px; max-width: 100%; }
+.tcode-range .tcode-track { position: relative; flex: 1 1 auto; height: 20px; }
+.tcode-range input[type=range] {
+    -webkit-appearance: none; appearance: none; position: absolute; inset: 0; width: 100%; height: 20px;
+    margin: 0; background: transparent; outline: none; --lo: 0%; --hi: 0%;
+}
+.tcode-range input[type=range]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px;
+    background: linear-gradient(to right, ${STASH.input} 0 var(--lo), ${STASH.accent} var(--lo) var(--hi), ${STASH.input} var(--hi) 100%);
+}
+.tcode-range input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 50%;
+    background: ${STASH.text}; box-shadow: 0 0 0 1px rgba(16,22,26,.4), 0 1px 2px rgba(16,22,26,.4); cursor: pointer;
+}
+.tcode-range input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(19,124,189,.6); }
+.tcode-range input[type=range]:disabled::-webkit-slider-thumb { background: ${STASH.muted}; cursor: default; }
+.tcode-range.dual input[type=range] { pointer-events: none; }
+.tcode-range.dual input[type=range]::-webkit-slider-thumb { pointer-events: auto; }
+.tcode-range.dual input[type=range].upper::-webkit-slider-runnable-track { background: transparent; }
+.tcode-range output { min-width: 10.5em; text-align: right; font-variant-numeric: tabular-nums; color: ${STASH.text}; font-size: .9rem; }
+
+/* Toasts, in Stash's secondary colour with a coloured edge per type. */
+#tcode-toasts { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 1080;
+                display: flex; flex-direction: column-reverse; gap: .5rem; pointer-events: none; width: 360px; max-width: calc(100vw - 32px); }
+.tcode-toast { background: ${STASH.input}; color: ${STASH.text}; border-radius: 3.5px; border-left: 4px solid ${STASH.accent};
+               box-shadow: 0 2px 8px rgba(16,22,26,.5); padding: .5rem .75rem; font-size: .875rem;
+               transition: opacity .25s ease, transform .25s ease; }
+.tcode-toast.success { border-left-color: ${STASH.success}; }
+.tcode-toast.warning { border-left-color: ${STASH.warning}; }
+.tcode-toast.error { border-left-color: ${STASH.danger}; }
+.tcode-toast .tcode-toast-title { font-weight: 600; }
+.tcode-toast .tcode-toast-body { color: ${STASH.muted}; margin-top: .1rem; }
+.tcode-toast.hiding { opacity: 0; transform: translateY(-6px); }
+`;
+    document.head.appendChild(s);
+}
+
+// Tiny DOM builder. props: class, text, style (cssText), on<event> handlers; value,
+// checked and disabled are set as properties; anything else becomes an attribute.
+function el(tag, props, children){
+    var e = document.createElement(tag);
+    for(var k in (props || {})){
+        var v = props[k];
+        if(v == null || v === false && k !== 'value'){ continue; }
+        if(k === 'class'){ e.className = v; }
+        else if(k === 'text'){ e.textContent = v; }
+        else if(k === 'style'){ e.style.cssText = v; }
+        else if(k === 'value' || k === 'checked' || k === 'disabled'){ e[k] = v; }
+        else if(k.indexOf('on') === 0){ e.addEventListener(k.slice(2), v); }
+        else { e.setAttribute(k, v); }
+    }
+    for(var c of (children || [])){
+        if(c == null){ continue; }
+        e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    }
+    return e;
+}
+
+// A Stash settings section: heading, optional sub-heading, and the card rows go into.
+function uiSection(parent, title, subheading){
+    var card = el('div', {class: 'card'});
+    parent.appendChild(el('div', {class: 'setting-section'}, [
+        el('h1', {text: title}),
+        subheading ? el('div', {class: 'sub-heading', text: subheading}) : null,
+        card
+    ]));
+    return card;
+}
+
+// One Stash settings row: title and hint on the left, control on the right.
+function uiSetting(parent, title, hint, control, opts){
+    opts = opts || {};
+    var row = el('div', {class: 'setting' + (opts.sub ? ' sub-setting' : '') + (opts.disabled ? ' disabled' : '')}, [
+        el('div', null, [el('h3', {text: title}), hint ? el('div', {class: 'sub-heading', text: hint}) : null]),
+        el('div', null, [control])
+    ]);
+    parent.appendChild(row);
+    return row;
+}
+
+function uiSwitch(id, checked, onChange){
+    var input = el('input', {type: 'checkbox', id: 'tcode-' + id, class: 'custom-control-input', checked: !!checked,
+                             onchange: function(){ onChange(input.checked); }});
+    return el('div', {class: 'custom-control custom-switch'}, [input, el('label', {class: 'custom-control-label', for: 'tcode-' + id})]);
+}
+
+function uiButton(label, variant, onClick, opts){
+    opts = opts || {};
+    return el('button', {type: 'button', class: 'btn btn-' + (variant || 'secondary') + (opts.small ? ' btn-sm' : ''),
+                         text: label, disabled: !!opts.disabled, onclick: onClick});
+}
+
+// Number box. Out-of-range or empty input snaps back to the nearest valid value on change.
+function uiNumber(id, value, o, onChange){
+    var input = el('input', {type: 'number', id: 'tcode-' + id, class: 'input-control form-control form-control-sm tcode-number',
+                             min: o.min, max: o.max, step: o.step || 1, value: value});
+    input.addEventListener('change', function(){
+        var v = parseFloat(input.value);
+        if(!isFinite(v)){ v = value; }
+        v = Math.min(o.max, Math.max(o.min, v));
+        input.value = v; value = v;
+        onChange(v);
+    });
+    return el('span', null, [input, o.suffix ? el('span', {class: 'tcode-suffix', text: o.suffix}) : null]);
+}
+
+function setRangeFill(input, loPct, hiPct){
+    input.style.setProperty('--lo', loPct + '%');
+    input.style.setProperty('--hi', hiPct + '%');
+}
+
+// Single slider with a readout. o: {min, max, step, format(v), origin}. The fill runs from
+// `origin` (default min) to the value. onInput fires while dragging, onChange on release.
+// Returns {el, set(v), setDisabled(bool)}.
+function uiRange(id, value, o, onInput, onChange){
+    var fmt = o.format || function(v){ return String(v); };
+    var input = el('input', {type: 'range', id: 'tcode-' + id, min: o.min, max: o.max, step: o.step || 1, value: value});
+    var out = el('output', {for: 'tcode-' + id});
+    var toPct = function(v){ return (v - o.min) / (o.max - o.min) * 100; };
+    function paint(){
+        var v = parseFloat(input.value), from = toPct(o.origin != null ? o.origin : o.min), to = toPct(v);
+        setRangeFill(input, Math.min(from, to), Math.max(from, to));
+        out.textContent = fmt(v);
+    }
+    input.addEventListener('input', function(){ paint(); if(onInput){ onInput(parseFloat(input.value)); } });
+    input.addEventListener('change', function(){ if(onChange){ onChange(parseFloat(input.value)); } });
+    paint();
+    return {
+        el: el('div', {class: 'tcode-range'}, [el('div', {class: 'tcode-track'}, [input]), out]),
+        set: function(v){ input.value = v; paint(); },
+        setDisabled: function(d){ input.disabled = d; }
+    };
+}
+
+// Two-handled range slider: two overlapping range inputs whose thumbs can't cross.
+// onInput(lo, hi) fires while dragging, onChange(lo, hi) on release.
+function uiDualRange(id, lo, hi, o, onInput, onChange){
+    var fmt = o.format || function(v){ return String(v); };
+    var lower = el('input', {type: 'range', class: 'lower', id: 'tcode-' + id + '-min', min: o.min, max: o.max, step: o.step || 1, value: lo,
+                             'aria-label': 'Minimum'});
+    var upper = el('input', {type: 'range', class: 'upper', id: 'tcode-' + id + '-max', min: o.min, max: o.max, step: o.step || 1, value: hi,
+                             'aria-label': 'Maximum'});
+    var out = el('output');
+    function values(){ return [parseFloat(lower.value), parseFloat(upper.value)]; }
+    function paint(){
+        var v = values(), span = o.max - o.min;
+        setRangeFill(lower, (v[0] - o.min) / span * 100, (v[1] - o.min) / span * 100);
+        out.textContent = fmt(v[0]) + ' – ' + fmt(v[1]);
+        // Upper sits above lower so its thumb isn't crossed by the lower's track; flip that
+        // when the lower thumb is near the top end, or it couldn't be grabbed there.
+        var lowerOnTop = v[0] > o.max - span * 0.05;
+        lower.style.zIndex = lowerOnTop ? 2 : 1;
+        upper.style.zIndex = lowerOnTop ? 1 : 2;
+    }
+    function onMove(e){
+        var v = values();
+        if(v[0] > v[1]){
+            if(e.target === lower){ lower.value = v[1]; } else { upper.value = v[0]; }
+        }
+        paint();
+        if(onInput){ onInput.apply(null, values()); }
+    }
+    lower.addEventListener('input', onMove); upper.addEventListener('input', onMove);
+    lower.addEventListener('change', function(){ if(onChange){ onChange.apply(null, values()); } });
+    upper.addEventListener('change', function(){ if(onChange){ onChange.apply(null, values()); } });
+    paint();
+    return { el: el('div', {class: 'tcode-range dual'}, [el('div', {class: 'tcode-track'}, [lower, upper]), out]) };
+}
+
+// --- TOASTS ---
 function showToast(title, message, type = 'info', duration = 4000) {
     if (!settings.showNotifications) return;
-
-    initToastContainer();
-
-    var icons = {
-        success: '✅',
-        info: 'ℹ️',
-        warning: '⚠️',
-        error: '❌'
-    };
-
-    var toast = document.createElement('div');
-    toast.className = 'tcode-toast toast-' + type;
-    toast.innerHTML = `
-        <span class="toast-icon">${icons[type] || icons.info}</span>
-        <div class="toast-content">
-            <div class="toast-title">${title}</div>
-            ${message ? '<div class="toast-message">' + message + '</div>' : ''}
-        </div>
-    `;
-
-    toastContainer.appendChild(toast);
-
-    // Auto-remove after duration
-    setTimeout(() => {
-        toast.classList.add('toast-exit');
-        setTimeout(() => {
-            if (toast.parentNode) toast.remove();
-        }, 300);
+    injectUiStyles();
+    var box = document.getElementById('tcode-toasts');
+    if(!box){ box = el('div', {id: 'tcode-toasts', role: 'status', 'aria-live': 'polite'}); document.body.appendChild(box); }
+    var toast = el('div', {class: 'tcode-toast ' + type}, [
+        el('div', {class: 'tcode-toast-title', text: title}),
+        message ? el('div', {class: 'tcode-toast-body', text: message}) : null
+    ]);
+    box.appendChild(toast);
+    setTimeout(function(){
+        toast.classList.add('hiding');
+        setTimeout(function(){ toast.remove(); }, 250);
     }, duration);
 }
+
 // ---------------------------------
-
-function setKey(key){
-    settings[pendingKey] = key;
-    var label = document.getElementById(pendingKey).label;
-    document.getElementById(pendingKey).innerHTML = label + " " + settings[pendingKey];
-    pendingKey = null;
-    saveSettings();
-}
-
-function settingsAddButton(parent, id, label, key=""){
-    var button = document.createElement("button");
-    button.setAttribute("id", id);
-    button.innerHTML = label;
-    button.label = label;
-    if(key != ""){ button.innerHTML += " " + key; }
-    parent.appendChild(button);
-}
-
-function settingsAddCheckBox(parent, id, label){
-    var line = document.createElement("div");
-    line.className = "checkbox-line";
-    var box = document.createElement("input");
-    box.setAttribute("id", id);
-    box.setAttribute("type", "checkbox");
-    var boxLabel = document.createElement("label");
-    boxLabel.setAttribute("for", id);
-    boxLabel.textContent = label;
-    line.appendChild(box);
-    line.appendChild(boxLabel);
-    parent.appendChild(line);
-}
-
-function settingsAddInput(parent, id, label){
-    var input = document.createElement("input");
-    input.setAttribute("id", id);
-    input.style.marginLeft = "3px";
-    var inputLabel = document.createElement("label");
-    inputLabel.setAttribute("for", id);
-    inputLabel.innerHTML = " " + label;
-    parent.appendChild(inputLabel);
-    parent.appendChild(input);
-}
-
-function settingsAddDualSlider(parent, minId, maxId, label, minVal, maxVal, minLimit, maxLimit) {
-    minVal = parseFloat(minVal); maxVal = parseFloat(maxVal); minLimit = parseFloat(minLimit); maxLimit = parseFloat(maxLimit);
-    if (isNaN(minVal)) minVal = 0; if (isNaN(maxVal)) maxVal = 100; if (isNaN(minLimit)) minLimit = 0; if (isNaN(maxLimit)) maxLimit = 100;
-
-    var wrapper = document.createElement("div"); wrapper.className = "dual-slider-container";
-    var labelElem = document.createElement("label"); labelElem.innerHTML = label; wrapper.appendChild(labelElem);
-
-    // Slider wrapper for positioning
-    var sliderArea = document.createElement("div");
-    sliderArea.className = "slider-area";
-    sliderArea.style.cssText = "position: relative; height: 24px; width: 100%;";
-
-    var track = document.createElement("div"); track.className = "slider-track"; sliderArea.appendChild(track);
-    var fill = document.createElement("div"); fill.className = "slider-fill"; fill.id = minId + "Fill"; sliderArea.appendChild(fill);
-
-    var minSlider = document.createElement("input");
-    minSlider.type = "range"; minSlider.id = minId;
-    minSlider.min = minLimit; minSlider.max = maxLimit; minSlider.value = minVal; minSlider.step = "1";
-    minSlider.style.cssText = "position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 100%;";
-    sliderArea.appendChild(minSlider);
-
-    var maxSlider = document.createElement("input");
-    maxSlider.type = "range"; maxSlider.id = maxId;
-    maxSlider.min = minLimit; maxSlider.max = maxLimit; maxSlider.value = maxVal; maxSlider.step = "1";
-    maxSlider.style.cssText = "position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 100%;";
-    sliderArea.appendChild(maxSlider);
-
-    wrapper.appendChild(sliderArea);
-
-    var valuesDiv = document.createElement("div"); valuesDiv.className = "dual-slider-values";
-    var minSpan = document.createElement("span"); minSpan.id = minId + "Value"; minSpan.innerHTML = minVal; valuesDiv.appendChild(minSpan);
-    var maxSpan = document.createElement("span"); maxSpan.id = maxId + "Value"; maxSpan.innerHTML = maxVal; valuesDiv.appendChild(maxSpan);
-    wrapper.appendChild(valuesDiv);
-    parent.appendChild(wrapper);
-}
-
-function settingsAddSingleSlider(parent, id, label, value, minLimit, maxLimit, suffix="ms") {
-    value = parseFloat(value); minLimit = parseFloat(minLimit); maxLimit = parseFloat(maxLimit);
-    if (isNaN(value)) value = minLimit;
-
-    var wrapper = document.createElement("div"); wrapper.className = "single-slider-container";
-    var labelElem = document.createElement("label"); labelElem.innerHTML = label; wrapper.appendChild(labelElem);
-    var sliderWrapper = document.createElement("div"); sliderWrapper.className = "slider-wrapper"; wrapper.appendChild(sliderWrapper);
-    var track = document.createElement("div"); track.className = "slider-track"; sliderWrapper.appendChild(track);
-    var fill = document.createElement("div"); fill.className = "slider-fill"; fill.id = id + "Fill"; sliderWrapper.appendChild(fill);
-
-    var slider = document.createElement("input"); slider.type = "range"; slider.id = id; slider.min = minLimit; slider.max = maxLimit; slider.value = value; slider.step = "1";
-    if(isChrome){ slider.style = "margin-top: -4px; transform: translateY(-50%)"; }
-    sliderWrapper.appendChild(slider);
-
-    var valueSpan = document.createElement("span"); valueSpan.id = id + "Value"; valueSpan.className = "single-slider-value"; valueSpan.innerHTML = String(value + suffix).padStart(6, ' ');
-    wrapper.appendChild(valueSpan);
-    parent.appendChild(wrapper);
-
-    slider.addEventListener('input', () => {
-        const currentVal = parseFloat(slider.value);
-        const range = maxLimit - minLimit;
-        const percent = ((currentVal - minLimit) / range) * 100;
-        fill.style.width = `${percent}%`;
-        valueSpan.textContent = String(currentVal + suffix).padStart(6, ' ');
-    });
-    const initialRange = maxLimit - minLimit;
-    const initialPercent = ((value - minLimit) / initialRange) * 100;
-    fill.style.width = `${initialPercent}%`;
-}
-
-function settingsAddGroupedControls(parent, checkboxId, axis, minId, maxId, sliderLabel, minVal, maxVal, minLimit, maxLimit, allSliderIds) {
-    const groupContainer = document.createElement('div'); groupContainer.classList.add('control-group'); parent.appendChild(groupContainer);
-    // Two stacked rows: the group used to be one flex line and overflowed horizontally
-    // once the home controls were added.
-    const rowTop = document.createElement('div'); rowTop.classList.add('control-row'); groupContainer.appendChild(rowTop);
-    const rowBottom = document.createElement('div'); rowBottom.classList.add('control-row', 'control-row-secondary'); groupContainer.appendChild(rowBottom);
-    const checkboxWrapper = document.createElement('div'); checkboxWrapper.classList.add('checkbox-wrapper');
-    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = checkboxId; checkbox.checked = false;
-    checkboxWrapper.appendChild(checkbox);
-    const label = document.createElement('label'); label.setAttribute('for', checkboxId); label.textContent = axis;
-    checkboxWrapper.appendChild(label); rowTop.appendChild(checkboxWrapper);
-
-    const randomWrapper = document.createElement('div'); randomWrapper.classList.add('random-wrapper');
-    const randomCheckbox = document.createElement('input'); randomCheckbox.type = 'checkbox'; randomCheckbox.id = `random${axis}`;
-    randomWrapper.appendChild(randomCheckbox);
-    const randomLabel = document.createElement('label'); randomLabel.setAttribute('for', `random${axis}`); randomLabel.textContent = 'Random';
-    randomWrapper.appendChild(randomLabel);
-
-    const trackDropdown = document.createElement('select'); trackDropdown.id = `track${axis}`;
-    allSliderIds.forEach(id => {
-        if (id !== minId) {
-            const option = document.createElement('option'); option.value = id; option.textContent = id; trackDropdown.appendChild(option);
-        }
-    });
-    randomWrapper.appendChild(trackDropdown); rowTop.appendChild(randomWrapper);
-
-    const invertWrapper = document.createElement('div'); invertWrapper.classList.add('invert-wrapper');
-    const invertCheckbox = document.createElement('input'); invertCheckbox.type = 'checkbox'; invertCheckbox.id = `invert${axis}`;
-    invertWrapper.appendChild(invertCheckbox);
-    const invertLabel = document.createElement('label'); invertLabel.setAttribute('for', `invert${axis}`); invertLabel.textContent = 'Invert';
-    invertWrapper.appendChild(invertLabel);
-    rowTop.appendChild(invertWrapper);
-
-    settingsAddDualSlider(rowTop, minId, maxId, sliderLabel, minVal, maxVal, minLimit, maxLimit);
-    const dualSliderContainer = groupContainer.querySelector('.dual-slider-container');
-
-    // --- Center controls ---
-    const cfg = settings.axes[axis] || {};
-    const centerWrapper = document.createElement('div'); centerWrapper.classList.add('center-wrapper');
-    const autoCenterCb = document.createElement('input'); autoCenterCb.type = 'checkbox'; autoCenterCb.id = `autoCenter${axis}`;
-    autoCenterCb.checked = (cfg.autoCenter !== false);
-    centerWrapper.appendChild(autoCenterCb);
-    const autoCenterLabel = document.createElement('label'); autoCenterLabel.setAttribute('for', `autoCenter${axis}`); autoCenterLabel.textContent = 'Auto home';
-    centerWrapper.appendChild(autoCenterLabel);
-    rowBottom.appendChild(centerWrapper);
-    toolTip(autoCenterCb, "Rest this axis at the middle of its range. Uncheck to pick the resting position yourself.");
-
-    var startCenter = (cfg.autoCenter === false && cfg.center != null && cfg.center !== "")
-        ? parseInt(cfg.center)
-        : Math.round(parseFloat(minVal) + ((parseFloat(maxVal) - parseFloat(minVal)) / 2));
-    settingsAddSingleSlider(rowBottom, `center${axis}`, "Home:", startCenter, minLimit, maxLimit, "");
-    const centerSlider = groupContainer.querySelector(`#center${axis}`);
-    if(centerSlider){ toolTip(centerSlider, "Where this axis sits when idle \u2014 on connect, on scene change, and via Home Now."); }
-    const centerContainer = centerSlider ? centerSlider.closest('.single-slider-container') : null;
-
-    function refreshCenterState(){
-        var auto = autoCenterCb.checked;
-        if(centerSlider){ centerSlider.disabled = auto; }
-        if(centerContainer){ centerContainer.style.opacity = auto ? '0.5' : '1'; }
-        if(auto && centerSlider){
-            // Track the live midpoint so the readout stays truthful as the range moves.
-            var lo = parseFloat(document.querySelector('#' + minId)?.value ?? minVal);
-            var hi = parseFloat(document.querySelector('#' + maxId)?.value ?? maxVal);
-            var mid = Math.round(lo + ((hi - lo) / 2));
-            centerSlider.value = mid;
-            centerSlider.dispatchEvent(new Event('input'));
-        }
-    }
-    autoCenterCb.addEventListener('change', () => {
-        settings.axes[axis].autoCenter = autoCenterCb.checked;
-        if(!autoCenterCb.checked && centerSlider){ settings.axes[axis].center = parseInt(centerSlider.value); }
-        refreshCenterState();
-        if(serialConnected){ centerAxis(axis); }
-    });
-    if(centerSlider){
-        centerSlider.addEventListener('input', () => {
-            if(autoCenterCb.checked){ return; }
-            settings.axes[axis].center = parseInt(centerSlider.value);
-        });
-        // Preview on release rather than on every input event, so dragging doesn't
-        // flood the serial writer.
-        centerSlider.addEventListener('change', () => {
-            if(!autoCenterCb.checked && serialConnected){ centerAxis(axis); }
-        });
-    }
-    groupContainer._refreshCenterState = refreshCenterState;
-    refreshCenterState();
-
-    checkbox.addEventListener('change', (event) => {
-        settings.axes[axis].enabled = event.target.checked;
-        if (event.target.checked) {
-            dualSliderContainer.classList.remove('disabled');
-            randomWrapper.style.opacity = '1';
-            invertWrapper.style.opacity = '1';
-            rowBottom.classList.remove('disabled');
-        } else {
-            dualSliderContainer.classList.add('disabled');
-            randomWrapper.style.opacity = '0.5';
-            invertWrapper.style.opacity = '0.5';
-            rowBottom.classList.add('disabled');
-        }
-    });
-    randomCheckbox.addEventListener('change', (event) => { settings.axes[axis].random = event.target.value; });
-    invertCheckbox.addEventListener('change', (event) => { settings.axes[axis].invert = event.target.checked; });
-    toolTip(randomCheckbox, "Generates random motion, based on selected axis");
-    if (!checkbox.checked) {
-        dualSliderContainer.classList.add('disabled');
-        randomWrapper.style.opacity = '0.5';
-        invertWrapper.style.opacity = '0.5';
-        rowBottom.classList.add('disabled');
-    }
-}
-
-function menuListeners(keys){
-    for(var key of keys){
-        document.getElementById(key).addEventListener("click", function(){ this.innerHTML = "Press a key..."; pendingKey = this.id; }, false);
-    }
-}
-
-function dualSliderListeners(minId, maxId) {
-    const minSlider = document.getElementById(minId); const maxSlider = document.getElementById(maxId);
-    const fill = document.getElementById(minId + "Fill"); const minValueDisplay = document.getElementById(minId + "Value"); const maxValueDisplay = document.getElementById(maxId + "Value");
-    if (!minSlider || !maxSlider || !minValueDisplay || !maxValueDisplay || !fill) return;
-
-    function updateDualSlider() {
-        let currentMinVal = parseFloat(minSlider.value); let currentMaxVal = parseFloat(maxSlider.value);
-        if (currentMinVal > currentMaxVal) { minSlider.value = currentMaxVal; }
-        if (currentMaxVal < currentMinVal) { maxSlider.value = currentMinVal; }
-        currentMinVal = parseFloat(minSlider.value); currentMaxVal = parseFloat(maxSlider.value);
-        const range = parseFloat(maxSlider.max) - parseFloat(minSlider.min);
-        const minPercent = ((currentMinVal - parseFloat(minSlider.min)) / range) * 100;
-        const maxPercent = ((currentMaxVal - parseFloat(minSlider.min)) / range) * 100;
-        fill.style.left = `${minPercent}%`; fill.style.width = `${Math.abs(maxPercent - minPercent)}%`;
-        minValueDisplay.textContent = currentMinVal; maxValueDisplay.textContent = currentMaxVal;
-        setLimits(currentMinVal, currentMaxVal, minSlider.id.replace('min', ''), false);
-        // Auto-center follows the range, so refresh its readout when the handles move.
-        const group = minSlider.closest('.control-group');
-        if(group && typeof group._refreshCenterState === 'function'){ group._refreshCenterState(); }
-    }
-    minSlider.addEventListener('input', updateDualSlider); maxSlider.addEventListener('input', updateDualSlider);
-    updateDualSlider();
-}
-
-let activeTab = 'device';
-function settingsAddTabContent(parentDiv, type, id, label, key = "") {
-    switch (type) {
-        case 'button': settingsAddButton(parentDiv, id, label, key); break;
-        case 'checkbox': settingsAddCheckBox(parentDiv, id, label); break;
-        case 'input': settingsAddInput(parentDiv, id, label); break;
-    }
-}
-
-function showTab(tabId) {
-    const tabContents = document.querySelectorAll('.tcode-tab-content'); tabContents.forEach(content => { content.style.display = 'none'; });
-    const tabButtons = document.querySelectorAll('.tcode-tab-button'); tabButtons.forEach(button => { button.classList.remove('active-tab'); });
-    const selectedTabContent = document.getElementById(tabId + 'Content'); if (selectedTabContent) { selectedTabContent.style.display = 'block'; }
-    const selectedTabButton = document.getElementById(tabId + 'Tab'); if (selectedTabButton) { selectedTabButton.classList.add('active-tab'); }
-    activeTab = tabId;
-}
-
-function toolTip(element, txt){
-    var tooltip = document.querySelector('#dynamic-tooltip');
-    if(!tooltip){
-        tooltip = document.createElement('div'); tooltip.id = 'dynamic-tooltip';
-        tooltip.style.position = 'absolute'; tooltip.style.backgroundColor = 'black'; tooltip.style.color = 'white';
-        tooltip.style.padding = '5px'; tooltip.style.zIndex = '200000'; tooltip.style.visibility = 'hidden';
-        document.body.appendChild(tooltip);
-    }
-    var tooltipTimeout = null;
-    element.addEventListener('mouseover', () => { tooltipTimeout = setTimeout(function(){ tooltip.textContent = txt; tooltip.style.visibility = 'visible'; }, 750); });
-    element.addEventListener('mousemove', (e) => { tooltip.style.left = e.pageX + 10 + 'px'; tooltip.style.top = e.pageY + 10 + 'px'; });
-    element.addEventListener('mouseout', () => { clearTimeout(tooltipTimeout); tooltip.style.visibility = 'hidden'; });
-}
 
 // --- NAVBAR BUTTON (appended to the very end of the Donate/Stats/Settings/Help cluster) ---
 
@@ -620,19 +414,19 @@ function injectNavStyles(){
         #tcode-nav-btn { display: flex; align-items: center; }
         #tcode-nav-btn .tcode-nav-dot {
             display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-            margin-right: 6px; flex-shrink: 0;
-            background: #f87171; box-shadow: 0 0 4px rgba(248,113,113,0.9);
-            transition: background 0.2s ease, box-shadow 0.2s ease;
+            margin-right: 6px; flex-shrink: 0; background: #db3737;
+            transition: background 0.2s ease;
         }
-        #tcode-nav-btn.connected .tcode-nav-dot {
-            background: #4ade80; box-shadow: 0 0 4px rgba(74,222,128,0.9);
-        }
+        #tcode-nav-btn.connected .tcode-nav-dot { background: #0f9960; }
+        #tcode-nav-btn .tcode-nav-hr { margin-left: 8px; font-variant-numeric: tabular-nums; }
+        #tcode-nav-btn .tcode-nav-heart { color: #ff7373; margin-right: 3px; }
     `;
     document.head.appendChild(s);
 }
 
 // Reflect current serial status on the nav button (dot colour + label + tooltip).
 function updateNavButton(){
+    refreshSettingsTab('device');
     var btn = document.getElementById('tcode-nav-btn');
     if(!btn){ return; }
     var labelText = btn.querySelector('.tcode-nav-label-text');
@@ -664,11 +458,13 @@ function injectNavButton(){
     // own nav-utility styling, so it sits flush with its neighbors.
     btn.className = 'nav-utility minimal d-flex align-items-center h-100 btn btn-primary';
     btn.innerHTML = '<span class="tcode-nav-dot"></span>' +
-        '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span>';
+        '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span>' +
+        '<span class="tcode-nav-hr" style="display: none"><span class="tcode-nav-heart">♥</span><span class="tcode-nav-bpm"></span></span>';
     btn.addEventListener('click', function(){ toggleMenu(); });
 
     navButtons.appendChild(btn); // very end of the cluster
     updateNavButton();
+    updateHrUi();
 }
 
 // Stash is a React SPA and re-renders the navbar on navigation, which can drop our button.
@@ -678,381 +474,432 @@ function startNavButton(){
     setInterval(injectNavButton, 1000);
 }
 
-// ----------------------------------------------------------------
+// --- SETTINGS DIALOG ---
+// A Stash-style modal with a tab per area. Controls write straight into `settings` and
+// persist immediately, so closing the dialog never has anything left to save.
 
-// Tear down the settings menu. Removes the full-screen overlay UNCONDITIONALLY, even if
-// saveSettings throws — otherwise a save error would leave the invisible overlay on top of
-// the page, swallowing every click (this was the "scene tabs stop responding" bug).
-function closeSettings(){
-    pendingKey = null; // clear any half-started hotkey rebind so it can't swallow later keystrokes
-    try { saveSettings(); } catch(e){ debug("[TCode] saveSettings error on close: " + e); }
-    var overlayEl = document.getElementById("settings-overlay");
-    if(overlayEl){ overlayEl.remove(); }
-    var styleEl = document.getElementById("stash-tcode-styles");
-    if(styleEl){ styleEl.remove(); }
+var AXIS_LIST = ["L0", "L1", "L2", "R0", "R1", "R2"];
+var AXIS_NAMES = { L0: "Stroke", L1: "Surge", L2: "Sway", R0: "Twist", R1: "Roll", R2: "Pitch" };
+
+// Tabs in display order; later sections of the script push their own.
+var SETTINGS_TABS = [
+    { id: 'device', label: 'Device', build: buildDeviceTab },
+    { id: 'axes', label: 'Axes', build: buildAxesTab },
+    { id: 'advanced', label: 'Advanced', build: buildAdvancedTab }
+];
+var activeTab = 'device';
+
+function pct(v){ return Math.round(v / 99.99) + '%'; } // device units (0-9999) as a percentage
+function ms(v){ return Math.round(v) + ' ms'; }
+
+function settingsOpen(){ return !!document.getElementById('tcode-modal'); }
+
+function toggleMenu(){
+    if(settingsOpen()){ closeSettings(); } else { openSettings(); }
 }
 
-function toggleMenu() {
-    if (document.getElementById("settings-overlay") != null) {
-        document.getElementById("settings-close-btn").click();
-        return -1;
+function openSettings(){
+    if(settingsOpen()){ return; }
+    injectUiStyles();
+    var nav = el('nav', {class: 'nav nav-tabs', role: 'tablist'});
+    var body = el('div', {id: 'tcode-modal-body'});
+    var modal = el('div', {class: 'modal fade show', id: 'tcode-modal', role: 'dialog', 'aria-modal': 'true',
+                           'aria-labelledby': 'tcode-modal-title', tabindex: '-1', style: 'display: block;'}, [
+        el('div', {class: 'modal-dialog modal-lg modal-dialog-scrollable'}, [
+            el('div', {class: 'modal-content'}, [
+                el('div', {class: 'modal-header'}, [
+                    el('div', {class: 'modal-title h4', id: 'tcode-modal-title'}, ['TCode']),
+                    el('button', {type: 'button', class: 'close', 'aria-label': 'Close', onclick: closeSettings}, [el('span', {'aria-hidden': 'true', text: '×'})])
+                ]),
+                el('div', {class: 'modal-body'}, [nav, body]),
+                el('div', {class: 'modal-footer'}, [
+                    el('span', {class: 'tcode-version', text: 'Stash-TCode ' + GM_info.script.version}),
+                    uiButton('Close', 'secondary', closeSettings)
+                ])
+            ])
+        ])
+    ]);
+    // Clicking the dimmed area outside the dialog closes it.
+    modal.addEventListener('mousedown', function(e){ if(e.target === modal){ closeSettings(); } });
+    document.body.appendChild(el('div', {class: 'modal-backdrop fade show', id: 'tcode-modal-backdrop'}));
+    document.body.appendChild(modal);
+    document.body.classList.add('modal-open');
+    document.addEventListener('keydown', onSettingsKey, true);
+    for(var tab of SETTINGS_TABS){
+        nav.appendChild(el('a', {class: 'nav-item nav-link', role: 'tab', 'data-tab': tab.id, text: tab.label,
+                                 onclick: (function(id){ return function(){ showTab(id); }; })(tab.id)}));
     }
-
-    // Modern dark theme stylesheet
-    const styleSheet = document.createElement("style");
-    styleSheet.id = "stash-tcode-styles";
-    styleSheet.type = "text/css";
-    styleSheet.innerText = `
-/* Overlay backdrop with blur */
-#settings-overlay {
-    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    z-index: 999998; display: flex; align-items: center; justify-content: center;
-}
-
-/* Main settings panel */
-#settings {
-    position: relative; width: 90%; max-width: 700px; max-height: 85vh;
-    background: linear-gradient(145deg, #1a1a2e 0%, #16213e 100%);
-    border-radius: 16px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1);
-    overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-/* Header */
-#settings .settings-header {
-    background: linear-gradient(90deg, #0f3460 0%, #533483 100%);
-    padding: 20px 24px; display: flex; align-items: center; justify-content: space-between;
-}
-#settings .settings-title {
-    font-size: 1.5em; font-weight: 700; color: #fff; letter-spacing: 0.5px;
-    text-shadow: 0 2px 4px rgba(0,0,0,0.3);
-}
-#settings-close-btn {
-    width: 36px; height: 36px; border-radius: 50%; border: none;
-    background: rgba(255,255,255,0.1); color: #fff; font-size: 1.4em;
-    cursor: pointer; transition: all 0.2s ease; display: flex; align-items: center; justify-content: center;
-}
-#settings-close-btn:hover { background: rgba(255,255,255,0.2); transform: scale(1.1); }
-
-/* Tab navigation */
-#tabContainer {
-    display: flex; background: rgba(0,0,0,0.3); padding: 0 16px; gap: 4px;
-}
-.tcode-tab-button {
-    padding: 14px 20px; border: none; background: transparent; color: rgba(255,255,255,0.6);
-    font-size: 0.95em; font-weight: 500; cursor: pointer; transition: all 0.2s ease;
-    border-bottom: 3px solid transparent; text-transform: uppercase; letter-spacing: 0.5px;
-}
-.tcode-tab-button:hover { color: rgba(255,255,255,0.9); background: rgba(255,255,255,0.05); }
-.tcode-tab-button.active-tab {
-    color: #e94560 !important; border-bottom-color: #e94560 !important;
-    background: rgba(233, 69, 96, 0.1) !important;
-}
-
-/* Tab content area */
-#tabContentContainer {
-    padding: 24px; max-height: calc(85vh - 140px); overflow-y: auto; color: #e0e0e0;
-}
-#tabContentContainer::-webkit-scrollbar { width: 8px; }
-#tabContentContainer::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 4px; }
-#tabContentContainer::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 4px; }
-#tabContentContainer::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
-.tcode-tab-content { display: none; animation: fadeIn 0.3s ease; }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-
-/* Control groups */
-.control-group {
-    display: flex; flex-direction: column; align-items: stretch; gap: 10px; padding: 16px 20px; margin-bottom: 12px;
-    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 12px; transition: all 0.2s ease;
-}
-.control-group:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.15); }
-.control-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; width: 100%; min-width: 0; }
-.control-row > .dual-slider-container, .control-row > .single-slider-container { flex: 1 1 240px; min-width: 200px; }
-.control-row-secondary { padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.08); }
-.control-row.disabled { pointer-events: none; opacity: 0.4; }
-.checkbox-line { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
-.checkbox-line label { color: rgba(255,255,255,0.85); font-size: 0.95em; cursor: pointer; line-height: 1.3; }
-.checkbox-line input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
-.center-wrapper { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-.center-wrapper label { color: rgba(255,255,255,0.7); font-size: 0.9em; }
-.checkbox-wrapper { display: flex; align-items: center; gap: 8px; min-width: 50px; }
-.checkbox-wrapper label { color: #fff; font-weight: 600; font-size: 1.1em; }
-.random-wrapper { display: flex; align-items: center; gap: 8px; }
-.random-wrapper label { color: rgba(255,255,255,0.7); font-size: 0.9em; }
-.invert-wrapper { display: flex; align-items: center; gap: 8px; }
-.invert-wrapper label { color: rgba(255,255,255,0.7); font-size: 0.9em; }
-
-/* Custom checkboxes */
-.control-group input[type="checkbox"], #tabContentContainer input[type="checkbox"] {
-    width: 20px; height: 20px; accent-color: #e94560; cursor: pointer;
-}
-
-/* Dropdowns */
-.control-group select, #tabContentContainer select {
-    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
-    color: #fff; padding: 6px 10px; border-radius: 6px; cursor: pointer;
-}
-.control-group select option, #tabContentContainer select option {
-    background: #1a1a2e; color: #fff;
-}
-.control-group select:focus, #tabContentContainer select:focus { outline: none; border-color: #e94560; }
-
-/* Dual slider container */
-.dual-slider-container {
-    flex: 1; min-width: 200px; margin: 0; padding: 5px 0;
-}
-.dual-slider-container.disabled { pointer-events: none; opacity: 0.4; }
-.dual-slider-container > label { display: block; margin-bottom: 8px; color: rgba(255,255,255,0.7); font-size: 0.9em; }
-.dual-slider-container .slider-area {
-    position: relative; height: 24px; width: 100%;
-}
-.dual-slider-container .slider-track {
-    position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%);
-    height: 6px; border-radius: 3px; background: rgba(255,255,255,0.15); z-index: 0;
-}
-.dual-slider-container .slider-fill {
-    position: absolute; top: 50%; transform: translateY(-50%);
-    height: 6px; border-radius: 3px; background: linear-gradient(90deg, #e94560, #533483);
-    z-index: 1; left: 0; width: 100%;
-}
-.dual-slider-container input[type="range"] {
-    -webkit-appearance: none; appearance: none; width: 100%; outline: none;
-    background: transparent; pointer-events: none; z-index: 3; margin: 0; height: 24px;
-}
-.dual-slider-container input[type="range"]::-webkit-slider-runnable-track {
-    height: 6px; background: transparent;
-}
-.dual-slider-container input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none; appearance: none; height: 18px; width: 18px;
-    background: #fff; cursor: pointer; pointer-events: auto; border-radius: 50%;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.3), 0 0 0 2px rgba(233, 69, 96, 0.3);
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-    margin-top: -6px;
-}
-.dual-slider-container input[type="range"]::-webkit-slider-thumb:hover {
-    transform: scale(1.15);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.4), 0 0 0 3px rgba(233, 69, 96, 0.4);
-}
-.dual-slider-container input[type="range"]:hover { z-index: 10; }
-.dual-slider-container input[type="range"]:active { z-index: 11; }
-.dual-slider-values {
-    display: flex; justify-content: space-between; margin-top: 8px;
-    font-size: 0.85em; color: rgba(255,255,255,0.7); font-weight: 500;
-}
-.dual-slider-values span {
-    min-width: 40px; text-align: center;
-}
-
-/* Single slider */
-.single-slider-container {
-    display: flex; align-items: center; gap: 16px; width: 100%;
-    padding: 16px 20px; background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; margin-bottom: 12px;
-}
-.single-slider-container label { color: #fff; font-weight: 500; min-width: 60px; }
-.single-slider-container .slider-wrapper {
-    position: relative; flex-grow: 1; display: flex; align-items: center; height: 24px;
-}
-.single-slider-container .slider-track, .single-slider-container .slider-fill {
-    position: absolute; height: 6px; border-radius: 3px; left: 0; top: 50%; transform: translateY(-50%); width: 100%;
-}
-.single-slider-container .slider-track { background: rgba(255,255,255,0.15); }
-.single-slider-container .slider-fill { background: linear-gradient(90deg, #e94560, #533483); }
-.single-slider-container input[type="range"] {
-    -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer;
-    width: 100%; position: absolute; left: 0; top: 50%; transform: translateY(-50%); z-index: 2;
-}
-.single-slider-container input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none; height: 20px; width: 20px; background: #fff;
-    border-radius: 50%; box-shadow: 0 2px 6px rgba(0,0,0,0.3); cursor: pointer;
-}
-.single-slider-container input[type="range"]::-webkit-slider-runnable-track { background: transparent; }
-.single-slider-value {
-    flex-shrink: 0; min-width: 60px; text-align: right; color: rgba(255,255,255,0.8);
-    font-family: 'SF Mono', Monaco, monospace; font-size: 0.9em;
-}
-
-/* Buttons */
-#tabContentContainer button {
-    padding: 12px 24px; border: none; border-radius: 8px; font-size: 0.95em;
-    font-weight: 600; cursor: pointer; transition: all 0.2s ease; margin: 8px 8px 8px 0;
-}
-#btnConnectUSB {
-    background: linear-gradient(135deg, #e94560 0%, #533483 100%) !important;
-    color: #fff !important; box-shadow: 0 4px 15px rgba(233, 69, 96, 0.3);
-}
-#btnConnectUSB:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(233, 69, 96, 0.4); }
-#btnConnectUSB:disabled { opacity: 0.6; cursor: not-allowed; }
-#initialKey, #minKey, #settingsKey {
-    background: rgba(255,255,255,0.1) !important; color: #fff !important;
-    border: 1px solid rgba(255,255,255,0.2) !important;
-}
-#initialKey:hover, #minKey:hover, #settingsKey:hover {
-    background: rgba(255,255,255,0.15) !important; border-color: #e94560 !important;
-}
-
-/* Labels in tab content */
-#tabContentContainer > label { color: rgba(255,255,255,0.8); display: flex; align-items: center; gap: 8px; margin: 12px 0; }
-`;
-    document.head.appendChild(styleSheet);
-
-    // Create overlay backdrop
-    var overlay = document.createElement("div");
-    overlay.setAttribute("id", "settings-overlay");
-
-    // Main settings panel
-    var div = document.createElement("div");
-    div.setAttribute("id", "settings");
-
-    // Header
-    var header = document.createElement("div");
-    header.className = "settings-header";
-    var title = document.createElement("span");
-    title.className = "settings-title";
-    title.innerHTML = "⚙️ TCode Settings";
-    var closeBtn = document.createElement("button");
-    closeBtn.id = "settings-close-btn";
-    closeBtn.innerHTML = "✕";
-    header.appendChild(title);
-    header.appendChild(closeBtn);
-    div.appendChild(header);
-
-    // Tab container
-    var tabContainer = document.createElement("div");
-    tabContainer.id = "tabContainer";
-    div.appendChild(tabContainer);
-
-    // Tab content container
-    var tabContentContainer = document.createElement("div");
-    tabContentContainer.id = "tabContentContainer";
-    div.appendChild(tabContentContainer);
-
-    // Create tabs
-    const tabs = ['device', 'keys', 'axes', 'advanced'];
-    const tabContents = {};
-    const tabIcons = { device: '🔌', keys: '⌨️', axes: '🎚️', advanced: '🔧' };
-    tabs.forEach(t => {
-        const btn = document.createElement('button');
-        btn.id = t + 'Tab';
-        btn.className = 'tcode-tab-button';
-        btn.innerHTML = tabIcons[t] + ' ' + t.charAt(0).toUpperCase() + t.slice(1);
-        btn.addEventListener('click', () => showTab(t));
-        tabContainer.appendChild(btn);
-        const content = document.createElement('div');
-        content.id = t + 'Content';
-        content.className = 'tcode-tab-content';
-        content.style.display = 'none';
-        tabContentContainer.appendChild(content);
-        tabContents[t] = content;
-    });
-
-    // Device tab content
-    const deviceContentDiv = tabContents['device'];
-    const usbBtn = document.createElement('button');
-    usbBtn.id = "btnConnectUSB";
-    usbBtn.innerText = serialConnected ? "✓ USB Connected" : "🔗 Connect Serial (USB)";
-    usbBtn.onclick = function() { connectSerial(); };
-    if (serialConnected) usbBtn.disabled = true;
-    deviceContentDiv.appendChild(usbBtn);
-    deviceContentDiv.appendChild(document.createElement("br"));
-    deviceContentDiv.appendChild(document.createElement("br"));
-    settingsAddSingleSlider(deviceContentDiv, "sync", "Sync:", settings.sync, -250, 250);
-    settingsAddTabContent(deviceContentDiv, "checkbox", "homeEnabled", "Home axes on connect & scene change");
-    const homeEnabledCb = document.getElementById("homeEnabled");
-    if(homeEnabledCb){ toolTip(homeEnabledCb, "Off leaves the device wherever it stopped. The Home Now button still works either way."); }
-    settingsAddSingleSlider(deviceContentDiv, "centerTime", "Home time:", settings.centerTime, 100, 5000);
-    const centerTimeSlider = document.getElementById("centerTime");
-    if(centerTimeSlider){ toolTip(centerTimeSlider, "How long the device takes to travel to its home position. Higher is slower and gentler."); }
-    deviceContentDiv.appendChild(document.createElement("br"));
-    const centerNowBtn = document.createElement("button");
-    centerNowBtn.id = "btnCenterNow"; centerNowBtn.innerText = "Home Now";
-    centerNowBtn.addEventListener("click", function(){ saveSettings(false); centerAll(); }, false);
-    deviceContentDiv.appendChild(centerNowBtn);
-    toolTip(centerNowBtn, "Move every enabled axis to its home position now.");
-
-    // Keys tab content
-    const keysContentDiv = tabContents['keys'];
-    settingsAddTabContent(keysContentDiv, "button", "initialKey", "Set Initial Ranges: ", settings.initialKey);
-    keysContentDiv.appendChild(document.createElement("br"));
-    settingsAddTabContent(keysContentDiv, "button", "minKey", "Set Minimum: ", settings.minKey);
-
-    // Axes tab content
-    const axesContentDiv = tabContents['axes'];
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
-        settingsAddGroupedControls(axesContentDiv, "enable"+ax, ax, "min"+ax, "max"+ax, "Range:", getLimit(ax,LOWER), getLimit(ax,UPPER), 0, 9999, listAxes(ax));
-    });
-
-    // Advanced tab content
-    const advancedContentDiv = tabContents['advanced'];
-    settingsAddTabContent(advancedContentDiv, "checkbox", "showNotifications", "Show Script Load Notifications");
-    settingsAddTabContent(advancedContentDiv, "checkbox", "debug", "Enable Debug Mode");
-
-    // Append panel to overlay, then overlay to body
-    overlay.appendChild(div);
-    document.body.appendChild(overlay);
-
     showTab(activeTab);
-    settingsMenuApplySaved();
+    modal.focus();
+}
 
-    // Close button handler
-    closeBtn.addEventListener("click", function(){ closeSettings(); }, false);
+// Removes the dialog unconditionally: a stray full-screen layer would swallow every
+// click on the page.
+function closeSettings(){
+    try { saveSettings(); } catch(e){ debug("[TCode] saveSettings error on close: " + e); }
+    for(var id of ['tcode-modal', 'tcode-modal-backdrop']){
+        var node = document.getElementById(id);
+        if(node){ node.remove(); }
+    }
+    document.body.classList.remove('modal-open');
+    document.removeEventListener('keydown', onSettingsKey, true);
+}
 
-    // Click on backdrop to close
-    overlay.addEventListener("click", function(e){
-        if (e.target === overlay) closeBtn.click();
-    }, false);
+function onSettingsKey(e){
+    if(e.key === 'Escape'){ e.stopPropagation(); closeSettings(); }
+}
 
-    document.getElementById("settings").addEventListener("change", function(){ saveSettings(false); }, false);
-    menuListeners(["initialKey", "minKey"]);
-    // Set each slider to the saved/live range before wiring listeners.
-    // (settingsMenuApplySaved restores checkboxes/dropdowns but never the range sliders,
-    //  so without this the handles show 0-9999 even when a range is stored.)
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
-        var lim = (AXIS[ax] && AXIS[ax].limits) ? AXIS[ax].limits
-                : (settings.axes[ax] && settings.axes[ax].limits) ? settings.axes[ax].limits
-                : [0, 9999];
-        var minEl = document.querySelector('#min'+ax);
-        var maxEl = document.querySelector('#max'+ax);
-        if(minEl){ minEl.value = lim[0]; }
-        if(maxEl){ maxEl.value = lim[1]; }
+function showTab(id){
+    if(!SETTINGS_TABS.some(function(t){ return t.id === id; })){ id = SETTINGS_TABS[0].id; }
+    activeTab = id;
+    document.querySelectorAll('#tcode-modal .nav-tabs .nav-link').forEach(function(a){
+        var on = a.getAttribute('data-tab') === id;
+        a.classList.toggle('active', on);
+        a.setAttribute('aria-selected', on ? 'true' : 'false');
     });
-    // dualSliderListeners runs updateDualSlider() immediately, redrawing the fill bar
-    // and the min/max value labels to match the values just set above.
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => dualSliderListeners("min"+ax, "max"+ax));
+    renderActiveTab();
+}
+
+// Rebuild the visible tab from current state (after a connection change, etc.).
+function renderActiveTab(){
+    var body = document.getElementById('tcode-modal-body');
+    if(!body){ return; }
+    var tab = SETTINGS_TABS.find(function(t){ return t.id === activeTab; });
+    body.textContent = '';
+    tab.build(body);
+}
+
+// Re-render only if the given tab is the one showing, so live updates don't reset a
+// tab the user is working in.
+function refreshSettingsTab(id){
+    if(settingsOpen() && activeTab === id){ renderActiveTab(); }
+}
+
+// ---- Device tab ----
+function buildDeviceTab(body){
+    var card = uiSection(body, "Device");
+    var status;
+    if(!serialConnected){ status = "Not connected"; }
+    else if(simulatedDevice){ status = "Simulated device (debug)"; }
+    else { status = "Connected over USB" + portLabel(); }
+    var statusEl = el('span', {class: 'tcode-status'}, [el('span', {class: 'tcode-dot' + (serialConnected ? ' on' : '')}), status]);
+    var row = uiSetting(card, "TCode device", null,
+        serialConnected ? uiButton("Disconnect", "secondary", disconnectSerial)
+                        : uiButton("Connect", "primary", connectSerial));
+    row.firstChild.appendChild(el('div', {class: 'sub-heading'}, [statusEl]));
+    uiSetting(card, "Reconnect automatically", "Reopen the device on page load, and when it's plugged back in.",
+        uiSwitch('autoConnect', settings.autoConnect !== false, function(v){ settings.autoConnect = v; saveSettings(); }));
+
+    var hrCard = uiSection(body, "Heart rate monitor");
+    var hrButton;
+    if(hr.status === 'live' || hr.status === 'connecting' || hr.status === 'reconnecting'){
+        hrButton = uiButton("Disconnect", "secondary", disconnectHr);
+    }else if(settings.hr.deviceId && !hrCanAutoReconnect()){
+        hrButton = uiButton("Reconnect", "primary", connectHr);
+    }else{
+        hrButton = uiButton("Connect", "primary", connectHr);
+    }
+    var hrRow = uiSetting(hrCard, "Monitor", null, hrButton);
+    hrRow.firstChild.appendChild(el('div', {class: 'sub-heading'}, [
+        el('span', {class: 'tcode-status'}, [el('span', {class: 'tcode-dot' + (hrLive() ? ' on' : ''), id: 'tcode-hr-dot'}),
+                                             el('span', {id: 'tcode-hr-status', text: hrStatusText()})])
+    ]));
+    hrRow.firstChild.appendChild(el('div', {class: 'sub-heading',
+        text: "Any Bluetooth monitor with the standard heart-rate service: chest straps, or watches broadcasting HR."}));
+
+    var play = uiSection(body, "Playback");
+    uiSetting(play, "Sync offset", "Shifts the script against the video. Positive plays strokes earlier.",
+        uiRange('sync', parseInt(settings.sync) || 0, {min: -250, max: 250, origin: 0, format: ms}, null,
+                function(v){ settings.sync = v; saveSettings(); }).el);
+
+    var home = uiSection(body, "Homing");
+    uiSetting(home, "Home on connect and scene change", "Off leaves the device wherever it stopped.",
+        uiSwitch('homeEnabled', settings.homeEnabled !== false, function(v){ settings.homeEnabled = v; saveSettings(); }));
+    uiSetting(home, "Home travel time", "How long the move to the home position takes. Longer is gentler.",
+        uiRange('centerTime', parseInt(settings.centerTime) || 1000, {min: 100, max: 5000, step: 50, format: ms}, null,
+                function(v){ settings.centerTime = v; saveSettings(); }).el);
+    uiSetting(home, "Home now", "Move every enabled axis to its home position.",
+        uiButton("Home now", "secondary", function(){ centerAll(); }, {disabled: !serialConnected}));
+}
+
+function portLabel(){
+    var p = settings.serialPort;
+    if(!p || p.usbVendorId == null){ return ""; }
+    var hex = function(n){ return Number(n).toString(16).toUpperCase().padStart(4, '0'); };
+    return " (" + hex(p.usbVendorId) + ":" + hex(p.usbProductId) + ")";
+}
+
+// ---- Axes tab ----
+function buildAxesTab(body){
+    var card = uiSection(body, "Axes", "Range limits how far each axis travels. Home is where it rests when idle.");
+    AXIS_LIST.forEach(function(axis){ buildAxisGroup(card, axis); });
+}
+
+function buildAxisGroup(card, axis){
+    var cfg = settings.axes[axis];
+    var group = el('div', {class: 'setting-group' + (cfg.enabled ? '' : ' collapsed')});
+    card.appendChild(group);
+
+    uiSetting(group, axis + " · " + AXIS_NAMES[axis], null, uiSwitch('enable' + axis, cfg.enabled, function(v){
+        cfg.enabled = v;
+        group.classList.toggle('collapsed', !v);
+        saveSettings();
+    }));
+
+    var lim = getLimit(axis, BOTH);
+    var homeRange;
+    function applyRange(lo, hi, send){
+        cfg.limits = [lo, hi];
+        if(AXIS[axis]){ setLimits(lo, hi, axis, send); }
+        if(send){ saveSettings(); }
+        syncHome();
+    }
+    uiSetting(group, "Range", null,
+        uiDualRange('range' + axis, parseInt(lim[0]), parseInt(lim[1]), {min: 0, max: 9999, format: pct},
+            function(lo, hi){ applyRange(lo, hi, false); },
+            function(lo, hi){ applyRange(lo, hi, true); }).el, {sub: true});
+    uiSetting(group, "Invert", "Flip the direction of this axis.",
+        uiSwitch('invert' + axis, cfg.invert, function(v){ cfg.invert = v; saveSettings(); }), {sub: true});
+    var freqRow;
+    uiSetting(group, "Auto motion", "When the scene has no script for this axis, move in a smooth sine wave instead.",
+        uiSwitch('auto' + axis, cfg.auto, function(v){ cfg.auto = v; freqRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
+    var hzFormat = function(v){ return v.toFixed(2) + " Hz · " + Math.round(v * 60) + "/min"; };
+    freqRow = uiSetting(group, "Frequency", "Full cycles per second.",
+        uiRange('autoHz' + axis, cfg.autoHz, {min: AUTO_HZ_MIN, max: AUTO_HZ_MAX, step: 0.05, format: hzFormat}, null,
+                function(v){ cfg.autoHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.auto});
+    var speedRow;
+    uiSetting(group, "Speed limit", "Cap how fast this axis moves. Faster moves are shortened so they stay in sync with the video.",
+        uiSwitch('speedLimit' + axis, cfg.speedLimit, function(v){ cfg.speedLimit = v; speedRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
+    // Stored as full travels per second (cfg.maxSpeed); shown as % of full travel per second.
+    speedRow = uiSetting(group, "Max speed", "How much of its full travel this axis may cover per second.",
+        uiRange('maxSpeed' + axis, Math.round(cfg.maxSpeed * 100), {min: MAX_SPEED_MIN * 100, max: MAX_SPEED_MAX * 100, step: 25,
+                format: function(v){ return v + "%/s"; }}, null,
+                function(v){ cfg.maxSpeed = v / 100; saveSettings(); }).el, {sub: true, disabled: !cfg.speedLimit});
+    uiSetting(group, "Auto home", "Rest at the middle of the range. Turn off to choose the home position.",
+        uiSwitch('autoCenter' + axis, cfg.autoCenter !== false, function(v){
+            cfg.autoCenter = v;
+            if(!v){ cfg.center = getCenter(axis); }
+            saveSettings();
+            syncHome();
+            if(serialConnected){ centerAxis(axis); }
+        }), {sub: true});
+    homeRange = uiRange('center' + axis, getCenter(axis), {min: 0, max: 9999, format: pct}, null, function(v){
+        cfg.center = v;
+        saveSettings();
+        if(serialConnected){ centerAxis(axis); } // preview on release, not on every input event
+    });
+    var homeRow = uiSetting(group, "Home position", null, homeRange.el, {sub: true});
+
+    function syncHome(){
+        var auto = cfg.autoCenter !== false;
+        homeRange.setDisabled(auto);
+        homeRow.classList.toggle('disabled', auto);
+        if(auto){ homeRange.set(getCenter(axis)); }
+    }
+    syncHome();
+}
+
+// ---- Advanced tab ----
+function buildAdvancedTab(body){
+    var card = uiSection(body, "Advanced");
+    uiSetting(card, "Stats overlay", "Heart rate, ceiling, edges and the current phase over the video, while a monitor is connected or modulation is on.",
+        uiSwitch('showHud', settings.showHud !== false, function(v){ settings.showHud = v; saveSettings(); updateHud(); }));
+    uiSetting(card, "Notifications", "Show pop-ups for connections and script loading.",
+        uiSwitch('showNotifications', settings.showNotifications !== false, function(v){ settings.showNotifications = v; saveSettings(); }));
+    uiSetting(card, "Debug mode", "Log details to the console and show the debug tools below.",
+        uiSwitch('debug', settings.debug, function(v){ settings.debug = v; saveSettings(); renderActiveTab(); }));
+    if(settings.debug){
+        var dbg = uiSection(body, "Debug tools", "window.__tcode is available in the page console.");
+        uiSetting(dbg, "Simulated device", "Stands in for a TCode device: commands are recorded, nothing is sent.",
+            uiButton(simulatedDevice ? "Running" : "Start", "secondary", function(){ connectSimulatedDevice(); renderActiveTab(); },
+                     {disabled: serialConnected}));
+        var simOn = hr.source === 'sim';
+        uiSetting(dbg, "Simulate heart rate", "Feeds a steady reading once a second in place of a monitor.",
+            uiSwitch('hrSim', simOn, function(v){ if(v){ startHrSim(); } else { stopHrSim(); } renderActiveTab(); }));
+        var simRange = uiRange('hrSimBpm', hrSimBpm, {min: 40, max: 200, format: function(v){ return v + " BPM"; }},
+            function(v){ hrSimBpm = v; if(hr.source === 'sim'){ feedHr(v, true); } }, null);
+        simRange.setDisabled(!simOn);
+        uiSetting(dbg, "Simulated BPM", null, simRange.el, {sub: true, disabled: !simOn});
+    }
+}
+
+// ---- Heart Rate tab ----
+SETTINGS_TABS.splice(2, 0, { id: 'hr', label: 'Heart Rate', build: buildHrTab });
+
+function buildHrTab(body){
+    var cfg = settings.hr;
+    var bpm = function(v){ return v + " BPM"; };
+    var sec = function(v){ return v + " s"; };
+    var changed = function(){ saveSettings(); refreshGovernor(); };
+
+    var main = uiSection(body, "Heart-rate modulation",
+        "Shortens strokes as your heart rate nears your edge, and holds the stroker back there until you recover.");
+    uiSetting(main, "Enable", hr.status === 'off' ? "Connect a monitor on the Device tab. Without one, scripts play normally." : null,
+        uiSwitch('hrEnabled', cfg.enabled, function(v){ cfg.enabled = v; changed(); }));
+    var live = uiSetting(main, "Session", null,
+        uiButton("Reset", "secondary", function(){ resetHrSession(); }, {small: true}));
+    live.firstChild.appendChild(el('div', {class: 'sub-heading', id: 'tcode-gov-status', text: govStatusText(lastGov)}));
+
+    var rates = uiSection(body, "Heart rate");
+    uiSetting(rates, "Edge", "The heart rate that counts as an edge. This is the ceiling: strokes stop here until you recover.",
+        uiNumber('edgeHr', cfg.edgeHr, {min: 50, max: 250, suffix: "BPM"}, function(v){ cfg.edgeHr = v; changed(); }));
+
+    var resp = uiSection(body, "Response");
+    uiSetting(resp, "Approach band", "Strokes start shortening this many BPM below the ceiling. 0 only reacts at the ceiling.",
+        uiRange('hrBand', cfg.band, {min: 0, max: 40, format: bpm}, null, function(v){ cfg.band = v; changed(); }).el);
+    uiSetting(resp, "Shortest stroke", "Stroke length just below the ceiling, as a share of the full range.",
+        uiRange('hrFloor', cfg.floor, {min: 0, max: 100, format: function(v){ return v + "%"; }}, null, function(v){ cfg.floor = v; changed(); }).el);
+    uiSetting(resp, "Rejoin time", "After an edge, strokes ramp back to full over this long.",
+        uiRange('hrRejoin', cfg.rejoinSec, {min: 0, max: 60, format: sec}, null, function(v){ cfg.rejoinSec = v; changed(); }).el);
+    uiSetting(resp, "Signal timeout", "If the monitor sends no real reading for this long (disconnected, or taken off), the device stops.",
+        uiRange('hrTimeout', cfg.timeoutSec, {min: 3, max: 20, format: sec}, null, function(v){ cfg.timeoutSec = v; changed(); }).el);
+
+    var decay = uiSection(body, "Adaptive ceiling decay", "Lowers the ceiling as edges add up, to counter fatigue over a long session.");
+    var decayRows = [];
+    uiSetting(decay, "Enable", null, uiSwitch('hrDecay', cfg.decay, function(v){
+        cfg.decay = v;
+        decayRows.forEach(function(r){ r.classList.toggle('disabled', !v); });
+        changed();
+    }));
+    decayRows.push(uiSetting(decay, "Every", "Number of edges per step.",
+        uiNumber('decayEvery', cfg.decayEvery, {min: 1, max: 10, suffix: "edges"}, function(v){ cfg.decayEvery = v; changed(); }), {sub: true}));
+    decayRows.push(uiSetting(decay, "Drop by", "How much the ceiling falls each step.",
+        uiNumber('decayBpm', cfg.decayBpm, {min: 1, max: 5, suffix: "BPM"}, function(v){ cfg.decayBpm = v; changed(); }), {sub: true}));
+    decayRows.push(uiSetting(decay, "Floor", "The ceiling never decays below this.",
+        uiNumber('decayFloor', cfg.decayFloor, {min: 80, max: 130, suffix: "BPM"}, function(v){ cfg.decayFloor = v; changed(); }), {sub: true}));
+    decayRows.forEach(function(r){ r.classList.toggle('disabled', !cfg.decay); });
+}
+
+// ---- Climax tab ----
+SETTINGS_TABS.splice(3, 0, { id: 'climax', label: 'Climax', build: buildClimaxTab });
+
+function buildClimaxTab(body){
+    var cfg = settings.hr;
+    var sec = function(v){ return v + " s"; };
+    var changed = function(){ saveSettings(); refreshGovernor(); };
+
+    var main = uiSection(body, "Climax markers",
+        "Scene markers with this tag release the limiter: strokes build to full before the marker and stay full, whatever your heart rate. Works with heart-rate modulation on.");
+    var tagInput = el('input', {type: 'text', id: 'tcode-climaxTag', class: 'input-control form-control form-control-sm', value: cfg.climaxTag,
+                                style: 'width: 160px', spellcheck: 'false'});
+    tagInput.addEventListener('change', function(){
+        cfg.climaxTag = tagInput.value.trim() || "Climax";
+        tagInput.value = cfg.climaxTag;
+        saveSettings();
+        fetchClimaxMarkers();
+    });
+    uiSetting(main, "Marker tag", "Primary or secondary tag. Add markers in Stash's Markers tab, or with the button below.", tagInput);
+
+    var onScene = isFinite(getSceneId());
+    var hint, list = null;
+    if(!onScene){ hint = "Open a scene to see its climax markers."; }
+    else if(!climaxMarkers.length){ hint = "No climax markers in this scene yet."; }
+    else {
+        hint = climaxMarkers.length + (climaxMarkers.length === 1 ? " marker. Click a time to jump to it." : " markers. Click a time to jump to it.");
+        list = el('ul', {class: 'tcode-list'}, climaxMarkers.map(function(m){
+            return el('li', null, [
+                el('a', {href: '#', text: formatTime(m.seconds) + (m.end != null ? " – " + formatTime(m.end) : ""), onclick: function(e){
+                    e.preventDefault();
+                    seekScene(m.seconds);
+                }})
+            ]);
+        }));
+    }
+    var row = uiSetting(main, "This scene", hint,
+        uiButton("Mark climax here", "primary", markClimaxHere, {disabled: !onScene || !boundPlayer}));
+    if(list){ row.firstChild.appendChild(list); }
+
+    var timing = uiSection(body, "Timing");
+    uiSetting(timing, "Build-up", "How long before the marker strokes start climbing back to full.",
+        uiRange('climaxRamp', cfg.climaxRampSec, {min: 0, max: 180, format: sec}, null, function(v){ cfg.climaxRampSec = v; changed(); }).el);
+    uiSetting(timing, "Hold", "How long strokes stay full after the marker. Markers with an end time hold for their whole range instead.",
+        uiRange('climaxHold', cfg.climaxHoldSec, {min: 5, max: 180, format: sec}, null, function(v){ cfg.climaxHoldSec = v; changed(); }).el);
+    uiSetting(timing, "Ease back", "How long it takes to hand control back to your heart rate afterwards.",
+        uiRange('climaxEase', cfg.climaxEaseSec, {min: 0, max: 180, format: sec}, null, function(v){ cfg.climaxEaseSec = v; changed(); }).el);
 }
 
 // --- WEB SERIAL IMPLEMENTATION ---
 
+// Ask the user to pick a port (needs a click), then open it.
 async function connectSerial() {
     if (!navigator.serial) {
         alert("Web Serial API is NOT available.\n\nUse a Chromium-based browser, and either serve Stash over HTTPS or add " + location.origin + " to 'Insecure origins treated as secure' in chrome://flags.");
         return;
     }
-
+    var picked;
     try {
-        port = await navigator.serial.requestPort();
-        await port.open({ baudRate: 115200 }); // Standard TCode Baud Rate
-        const textEncoder = new TextEncoderStream();
-        writableStreamClosed = textEncoder.readable.pipeTo(port.writable);
-        writer = textEncoder.writable.getWriter();
-        serialConnected = true;
-        keepReading = true;
-        var usbBtn = document.getElementById("btnConnectUSB");
-        if (usbBtn) {
-            usbBtn.innerText = "USB Connected";
-            usbBtn.disabled = true;
-        }
-        debug("USB Serial Connected");
-        createOverlay("USB Connected");
-        showToast("USB Connected", "Serial connection established at 115200 baud", "success");
-        updateNavButton(); // reflect connected state on the navbar
-        readSerialLoop();
+        picked = await navigator.serial.requestPort();
     } catch (e) {
-        console.error("Serial Connection Failed:", e);
-        showToast("Connection Failed", e.message, "error");
-        alert("Could not connect to Serial device. \n" + e.message);
+        if (e.name !== "NotFoundError") { showToast("Connection Failed", e.message, "error"); } // NotFoundError = picker cancelled
+        return;
     }
+    await openPort(picked, false);
+}
+
+// Open a port and wire up the writer and read loop. `silent` is for automatic reconnects:
+// failures are only logged, since the user didn't ask for anything.
+async function openPort(p, silent) {
+    if (serialConnected) { return true; }
+    try {
+        await p.open({ baudRate: 115200 }); // Standard TCode Baud Rate
+    } catch (e) {
+        console.error("[TCode] Serial open failed:", e);
+        if (!silent) { showToast("Connection Failed", e.message, "error"); }
+        return false;
+    }
+    port = p;
+    const textEncoder = new TextEncoderStream();
+    writableStreamClosed = textEncoder.readable.pipeTo(port.writable);
+    writer = textEncoder.writable.getWriter();
+    serialConnected = true;
+    simulatedDevice = false;
+    keepReading = true;
+    forgetAxisPositions();
+    // Remember which device this was so it can be reopened without the picker next time.
+    try {
+        var info = port.getInfo();
+        settings.serialPort = { usbVendorId: info.usbVendorId ?? null, usbProductId: info.usbProductId ?? null };
+        GM_setValue("settings", settings);
+    } catch (e) { debug("[TCode] getInfo failed: " + e); }
+    debug("USB Serial Connected");
+    showToast(silent ? "USB Reconnected" : "USB Connected", "Serial connection established at 115200 baud", "success");
+    updateNavButton(); // reflect connected state on the navbar
+    readSerialLoop();
+    return true;
+}
+
+// The previously used port among those this site already has permission for: an exact
+// USB vendor/product match, or the only granted port if no USB device was saved yet.
+// A saved device that isn't present never falls back to some other granted port, which
+// could be anything (an Arduino, a different toy) and would be sent TCode.
+function pickSavedPort(ports) {
+    var saved = settings.serialPort;
+    if (saved && saved.usbVendorId != null) {
+        return ports.find(function(p) {
+            var i = p.getInfo();
+            return i.usbVendorId === saved.usbVendorId && i.usbProductId === saved.usbProductId;
+        }) || null;
+    }
+    return ports.length === 1 ? ports[0] : null;
+}
+
+// Reopen a port the user granted earlier. Granted ports can be opened without a click,
+// so this runs on page load and again whenever a device is plugged in.
+async function autoConnectSerial() {
+    if (!navigator.serial || serialConnected || settings.autoConnect === false) { return; }
+    var ports;
+    try { ports = await navigator.serial.getPorts(); } catch (e) { return; }
+    var p = pickSavedPort(ports);
+    if (p) { await openPort(p, true); }
+}
+
+function startSerialAutoConnect() {
+    if (!navigator.serial) { return; }
+    navigator.serial.addEventListener("connect", function() {
+        debug("[TCode] Serial device plugged in");
+        autoConnectSerial();
+    });
+    autoConnectSerial();
 }
 
 async function readSerialLoop() {
@@ -1068,44 +915,689 @@ async function readSerialLoop() {
             }
         } catch (error) { console.error(error); } finally { reader.releaseLock(); }
     }
-    // Loop exited -> port no longer readable (device unplugged / closed). Reflect that.
+    // Loop exited -> port no longer readable (device unplugged) or we were asked to stop.
+    var manual = !keepReading;
+    var w = writer;
     serialConnected = false;
     writer = null;
+    // Release both pipes, then close our side so the same port can be reopened later.
+    // Each step is time-boxed: on an unplugged device they can stall instead of failing.
+    var settle = function(p){ return Promise.race([Promise.resolve(p).catch(function(){}), new Promise(function(r){ setTimeout(r, 500); })]); };
+    if (w) { await settle(w.close()); }
+    await settle(writableStreamClosed);
+    await settle(readableStreamClosed);
+    try { await port.close(); } catch (e) { debug("[TCode] port.close after disconnect: " + e); }
+    if (manual) {
+        showToast("USB Disconnected", "", "info");
+    } else {
+        showToast("USB Disconnected", settings.autoConnect !== false ? "Will reconnect when the device is plugged back in" : "", "warning");
+    }
     updateNavButton();
     debug("[TCode] Serial disconnected");
 }
 
+// Stop talking to the device. Auto-connect still applies on the next page load.
+async function disconnectSerial() {
+    if (simulatedDevice) {
+        simulatedDevice = false;
+        serialConnected = false;
+        writer = null;
+        updateNavButton();
+        return;
+    }
+    if (!serialConnected) { return; }
+    keepReading = false;
+    try { if (reader) { await reader.cancel(); } } catch (e) { debug("[TCode] reader.cancel: " + e); }
+}
+
 function sendTCode(data) {
-    if (serialConnected && writer) { writer.write(data); }
+    if (serialConnected && writer) {
+        writer.write(data);
+        if (settings.debug) { recordTx(data); }
+    }
+}
+
+// ---------------------------------
+
+// --- HEART RATE MONITOR (Web Bluetooth) ---
+// Any sensor exposing the standard Bluetooth Heart Rate service (0x180D): chest straps,
+// and watches that broadcast HR. Readings land in `hr`; the governor reads from there.
+
+var hr = {
+    bpm: null,          // last valid reading
+    at: 0,              // Date.now() of that reading
+    contact: null,      // true/false if the sensor reports skin contact, else null
+    status: 'off',      // off | connecting | live | reconnecting | lost
+    source: null,       // 'ble' | 'sim'
+    device: null,
+    characteristic: null,
+    battery: null,
+    retry: 0,
+    manualDisconnect: false,
+    rrRun: 0,           // consecutive packets carrying beat timing (RR intervals)
+    rrReliable: false,  // this connection has sent beat timing consistently
+    rejecting: null     // why the latest packets aren't counted: 'contact' | 'beats' | null
+};
+var hrPacketLog = [];   // debug: recent raw packets, newest last
+var HR_MIN_VALID = 35;                  // anything lower is a bad read, not a heartbeat
+var HR_RETRY_MS = [1000, 2000, 4000];   // reconnect attempts after an unexpected drop
+var hrSimTimer = null;
+var hrSimBpm = 80;
+
+// Decode a Heart Rate Measurement value (GATT 0x2A37). Byte 0 is flags: bit 0 picks a
+// uint8 or uint16 BPM, bits 1-2 report skin contact (0b11 contact, 0b10 none, else
+// unsupported), bit 3 adds a 2-byte energy field, bit 4 adds RR intervals (2 bytes per
+// detected beat). Returns {bpm, contact, rr} where rr is how many beats the packet
+// timed, or null when the value is too short to hold a reading.
+function parseHrMeasurement(view){
+    if(!view || view.byteLength < 2){ return null; }
+    var flags = view.getUint8(0);
+    var wide = (flags & 0x01) === 0x01;
+    if(wide && view.byteLength < 3){ return null; }
+    var bpm = wide ? view.getUint16(1, true) : view.getUint8(1);
+    var contactBits = (flags >> 1) & 0x03;
+    var contact = contactBits === 0x03 ? true : (contactBits === 0x02 ? false : null);
+    var offset = (wide ? 3 : 2) + ((flags & 0x08) ? 2 : 0);
+    var rr = (flags & 0x10) ? Math.max(0, Math.floor((view.byteLength - offset) / 2)) : 0;
+    return { bpm: bpm, contact: contact, rr: rr };
+}
+
+// Whether a packet is a real reading. A strap taken off often keeps sending its last
+// BPM, so besides the obvious (too low to be a pulse) a packet doesn't count when the
+// sensor says it has no skin contact. Sensors with no contact flag get a fallback: once
+// they've timed beats (RR intervals) consistently, a packet without beat timing doesn't
+// count. Watches and relay apps that only send RR now and then never become "reliable",
+// so they aren't caught by it. Rejected packets don't refresh the reading, so the
+// signal timeout trips as it would for a dropped connection.
+var HR_RR_RELIABLE_RUN = 5;
+function hrPacketVerdict(m, rrReliable){
+    if(m.bpm < HR_MIN_VALID){ return 'low'; }
+    if(m.contact === false){ return 'contact'; }
+    if(m.contact === null && rrReliable && m.rr === 0){ return 'beats'; }
+    return 'ok';
+}
+
+// The single entry point for a new reading, from the monitor or the simulator.
+function feedHr(bpm, contact){
+    hr.bpm = bpm;
+    hr.at = Date.now();
+    hr.contact = contact;
+    updateHrUi();
+    refreshGovernor();
+}
+
+function hrLive(){ return hr.status === 'live' && hr.bpm != null; }
+
+function onHrValue(e){
+    var m = parseHrMeasurement(e.target.value);
+    if(!m){ return; }
+    var verdict = hrPacketVerdict(m, hr.rrReliable);
+    hr.rrRun = m.rr > 0 ? hr.rrRun + 1 : 0;
+    if(hr.rrRun >= HR_RR_RELIABLE_RUN){ hr.rrReliable = true; }
+    if(settings.debug){
+        hrPacketLog.push({ t: Date.now(), bpm: m.bpm, contact: m.contact, rr: m.rr, verdict: verdict });
+        if(hrPacketLog.length > 600){ hrPacketLog.splice(0, hrPacketLog.length - 600); }
+    }
+    hr.contact = m.contact;
+    if(verdict !== 'ok'){
+        hr.rejecting = verdict === 'low' ? 'contact' : verdict;
+        updateHrUi();
+        return;
+    }
+    hr.rejecting = null;
+    feedHr(m.bpm, m.contact);
+}
+
+// Pick a monitor (needs a click) and connect to it.
+async function connectHr(){
+    if(!navigator.bluetooth){
+        showToast("Bluetooth Unavailable", "Web Bluetooth needs Chrome or Edge, and a secure origin (https, localhost, or the insecure-origins flag).", "error", 8000);
+        return;
+    }
+    var device;
+    try {
+        device = await navigator.bluetooth.requestDevice({ filters: [{ services: ['heart_rate'] }], optionalServices: ['battery_service'] });
+    } catch(e) {
+        if(e.name !== 'NotFoundError'){ showToast("Heart Rate Failed", e.message, "error"); } // NotFoundError = picker cancelled
+        return;
+    }
+    await attachHrDevice(device, false);
+}
+
+async function attachHrDevice(device, silent){
+    if(hr.device && hr.device !== device){ hr.device.removeEventListener('gattserverdisconnected', onHrDropped); }
+    stopHrSim();
+    hr.device = device;
+    hr.manualDisconnect = false;
+    device.removeEventListener('gattserverdisconnected', onHrDropped);
+    device.addEventListener('gattserverdisconnected', onHrDropped);
+    settings.hr.deviceId = device.id;
+    settings.hr.deviceName = device.name || "Heart rate monitor";
+    saveSettings();
+    return openHrGatt(silent);
+}
+
+async function openHrGatt(silent){
+    var device = hr.device;
+    if(!device){ return false; }
+    setHrStatus(hr.status === 'reconnecting' ? 'reconnecting' : 'connecting');
+    try {
+        var server = await device.gatt.connect();
+        var service = await server.getPrimaryService('heart_rate');
+        var ch = await service.getCharacteristic('heart_rate_measurement');
+        if(hr.characteristic && hr.characteristic !== ch){ hr.characteristic.removeEventListener('characteristicvaluechanged', onHrValue); }
+        ch.removeEventListener('characteristicvaluechanged', onHrValue);
+        ch.addEventListener('characteristicvaluechanged', onHrValue);
+        await ch.startNotifications();
+        hr.characteristic = ch;
+        hr.source = 'ble';
+        hr.retry = 0;
+        hr.rrRun = 0;
+        hr.rrReliable = false;
+        hr.rejecting = null;
+        setHrStatus('live');
+        readHrBattery(server);
+        showToast(silent ? "Heart Rate Reconnected" : "Heart Rate Connected", settings.hr.deviceName, "success");
+        return true;
+    } catch(e) {
+        console.error("[TCode] Heart rate connect failed:", e);
+        if(!silent){ showToast("Heart Rate Failed", e.message, "error"); }
+        if(hr.status !== 'reconnecting'){ setHrStatus('off'); }
+        return false;
+    }
+}
+
+async function readHrBattery(server){
+    try {
+        var svc = await server.getPrimaryService('battery_service');
+        var ch = await svc.getCharacteristic('battery_level');
+        hr.battery = (await ch.readValue()).getUint8(0);
+        updateHrUi();
+    } catch(e) { hr.battery = null; } // battery service is optional
+}
+
+// The link dropped without us asking: retry on a short backoff before calling it lost.
+function onHrDropped(){
+    if(hr.manualDisconnect || hr.source !== 'ble'){ return; }
+    hr.retry = 0;
+    setHrStatus('reconnecting');
+    retryHr();
+}
+
+function retryHr(){
+    if(hr.manualDisconnect || hr.status !== 'reconnecting'){ return; }
+    if(hr.retry >= HR_RETRY_MS.length){
+        setHrStatus('lost');
+        showToast("Heart Rate Lost", (settings.hr.deviceName || "Monitor") + " stopped responding", "warning", 6000);
+        return;
+    }
+    var delay = HR_RETRY_MS[hr.retry++];
+    setTimeout(async function(){
+        if(await openHrGatt(true)){ return; }
+        retryHr();
+    }, delay);
+}
+
+function disconnectHr(){
+    stopHrSim();
+    hr.manualDisconnect = true;
+    if(hr.device){
+        try { hr.device.gatt.disconnect(); } catch(e) {}
+    }
+    hr.source = null;
+    hr.bpm = null;
+    hr.battery = null;
+    setHrStatus('off');
+}
+
+// Reconnect the remembered monitor without the picker. Chrome only lists previously
+// granted devices through getDevices(), which isn't available everywhere; when it's
+// missing the Device tab offers a one-click reconnect instead.
+async function autoConnectHr(){
+    if(!navigator.bluetooth || typeof navigator.bluetooth.getDevices !== 'function' || !settings.hr.deviceId){ return; }
+    var devices;
+    try { devices = await navigator.bluetooth.getDevices(); } catch(e) { return; }
+    var device = devices.find(function(d){ return d.id === settings.hr.deviceId; });
+    if(!device){ return; }
+    if(await attachHrDevice(device, true)){ return; }
+    // Not reachable yet (asleep, out of range): wait for it to advertise, then connect.
+    if(typeof device.watchAdvertisements !== 'function'){ return; }
+    var abort = new AbortController();
+    device.addEventListener('advertisementreceived', function(){
+        abort.abort();
+        if(hr.status !== 'live'){ attachHrDevice(device, true); }
+    }, { once: true });
+    try { await device.watchAdvertisements({ signal: abort.signal }); } catch(e) { debug("[TCode] watchAdvertisements: " + e); }
+}
+
+function hrCanAutoReconnect(){
+    return !!(navigator.bluetooth && typeof navigator.bluetooth.getDevices === 'function');
+}
+
+// ---- simulator (debug) ----
+// Feeds a steady reading once a second, the cadence of a real strap, so everything
+// downstream (including the signal watchdog) behaves as it would with a monitor.
+function startHrSim(bpm){
+    if(bpm != null){ hrSimBpm = bpm; }
+    if(hr.source === 'ble'){ disconnectHr(); }
+    hr.manualDisconnect = false;
+    hr.source = 'sim';
+    setHrStatus('live');
+    feedHr(hrSimBpm, true);
+    if(!hrSimTimer){ hrSimTimer = setInterval(function(){ feedHr(hrSimBpm, true); }, 1000); }
+}
+
+function stopHrSim(){
+    if(hrSimTimer){ clearInterval(hrSimTimer); hrSimTimer = null; }
+    if(hr.source === 'sim'){ hr.source = null; hr.bpm = null; setHrStatus('off'); }
+}
+
+// ---- UI hooks ----
+function setHrStatus(status){
+    hr.status = status;
+    updateHrUi();
+    refreshGovernor();
+    refreshSettingsTab('device');
+}
+
+function hrStatusText(){
+    var name = settings.hr.deviceName || "Monitor";
+    switch(hr.status){
+        case 'live': return (hr.source === 'sim' ? "Simulated" : name) + (hr.bpm != null ? " · " + hr.bpm + " BPM" : "") +
+                            (hr.battery != null ? " · battery " + hr.battery + "%" : "") +
+                            (hr.rejecting === 'contact' ? " · no skin contact" : (hr.rejecting === 'beats' ? " · no beats detected" : ""));
+        case 'connecting': return "Connecting to " + name + "…";
+        case 'reconnecting': return "Reconnecting to " + name + "…";
+        case 'lost': return name + " lost";
+        default: return "Not connected";
+    }
+}
+
+// Cheap live updates (nav readout, status line) without re-rendering the dialog.
+function updateHrUi(){
+    var navHr = document.querySelector('#tcode-nav-btn .tcode-nav-hr');
+    if(navHr){
+        navHr.querySelector('.tcode-nav-bpm').textContent = hrLive() ? hr.bpm : "";
+        navHr.style.display = hrLive() ? "" : "none";
+    }
+    var line = document.getElementById('tcode-hr-status');
+    if(line){ line.textContent = hrStatusText(); }
+    var dot = document.getElementById('tcode-hr-dot');
+    if(dot){ dot.classList.toggle('on', hrLive()); }
+}
+
+// ---------------------------------
+
+// --- DEBUG TOOLS ---
+// Only active with Debug on (Advanced tab). Tampermonkey runs this script in an isolated
+// world, so the hooks are published on the page window as window.__tcode for the console.
+
+var txLog = []; // [{t, data}] -- every chunk written to the device, newest last
+var TX_LOG_MAX = 5000;
+var simulatedDevice = false;
+
+function recordTx(data){
+    txLog.push({ t: Math.round(performance.now()), data: data });
+    if(txLog.length > TX_LOG_MAX){ txLog.splice(0, txLog.length - TX_LOG_MAX); }
+}
+
+// Pretend a device is connected: commands are recorded but go nowhere, and the D2 limits
+// query is answered locally, so playback can be exercised without the hardware moving.
+function connectSimulatedDevice(){
+    if(serialConnected){ return; }
+    simulatedDevice = true;
+    writer = {
+        write: function(data){
+            if(String(data).indexOf("D2") !== -1){
+                setTimeout(function(){
+                    processWSReply({ data: "L0 0 9999\n" }); // a plain single-axis stroker
+                }, 20);
+            }
+            return Promise.resolve();
+        }
+    };
+    serialConnected = true;
+    forgetAxisPositions();
+    showToast("Simulated Device", "Commands are recorded, nothing is sent", "info");
+    updateNavButton();
+}
+
+function publishDebugApi(){
+    if(!settings.debug){ return; }
+    unsafeWindow.__tcode = {
+        // Axis commands as [{t, axis, pos, ms}], parsed from the TX log.
+        commands: function(){
+            var out = [];
+            for(var e of txLog){
+                var re = /([LR]\d)(\d{4})I(\d+)/g, m;
+                while((m = re.exec(e.data))){ out.push({ t: e.t, axis: m[1], pos: +m[2], ms: +m[3] }); }
+            }
+            return out;
+        },
+        tx: function(){ return txLog.slice(); },
+        clearTx: function(){ txLog.length = 0; },
+        simulateDevice: connectSimulatedDevice,
+        seek: seekScene, // jump the player to a scene time in seconds
+        // Simulated heart rate: setHr(bpm) starts or updates it, setHr(null) stops it.
+        setHr: function(bpm){ if(bpm == null){ stopHrSim(); } else { startHrSim(bpm); } },
+        hr: function(){ return { bpm: hr.bpm, at: hr.at, ageMs: hr.at ? Date.now() - hr.at : null, contact: hr.contact,
+                                 status: hr.status, source: hr.source, battery: hr.battery }; },
+        governor: function(){ return { last: lastGov, session: Object.assign({}, hrSession), marks: climaxMarksMs.slice() }; },
+        // Raw monitor packets (debug mode only): {t, bpm, contact, rr, verdict}.
+        hrPackets: function(){ return hrPacketLog.slice(); },
+        resetSession: resetHrSession,
+        state: function(){
+            var axes = {};
+            for(var ax in AXIS){
+                axes[ax] = { limits: AXIS[ax].limits, loaded: !!AXIS[ax].scriptLoaded,
+                             acts: AXIS[ax].acts ? AXIS[ax].acts.length : 0, enabled: !!(settings.axes[ax] && settings.axes[ax].enabled) };
+            }
+            return { connected: serialConnected, simulated: simulatedDevice, axes: axes,
+                     settings: JSON.parse(JSON.stringify(settings)) };
+        }
+    };
+}
+
+// ---------------------------------
+
+// --- STATS OVERLAY ---
+// A small panel over the video: heart rate, ceiling, edges, the governor's phase and
+// allowance, and the next climax marker. It lives inside the video.js container so it
+// stays visible in fullscreen, ignores the mouse, and refreshes at 4 Hz.
+
+var hudTimer = null;
+var HUD_COLORS = { ok: "#3dcc91", warn: "#ffb366", stop: "#ff7373", climax: "#48aff0", off: "#bfccd6" };
+
+function injectHudStyles(){
+    if(document.getElementById('tcode-hud-styles')){ return; }
+    var s = document.createElement('style');
+    s.id = 'tcode-hud-styles';
+    s.textContent = `
+#tcode-hud { position: absolute; top: 12px; left: 12px; z-index: 2; pointer-events: none; user-select: none;
+             min-width: 170px; padding: 8px 10px; border-radius: 4px; background: rgba(16, 22, 26, .62);
+             color: #f5f8fa; font-size: 12px; line-height: 1.35; font-variant-numeric: tabular-nums;
+             text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+#tcode-hud .hud-top { display: flex; align-items: baseline; gap: 6px; }
+#tcode-hud .hud-heart { font-size: 14px; display: inline-block; animation: tcode-beat 1s ease-in-out infinite; }
+#tcode-hud .hud-bpm { font-size: 22px; font-weight: 600; }
+#tcode-hud .hud-ceiling { color: #bfccd6; }
+#tcode-hud .hud-decay { color: #ffb366; font-size: 11px; }
+#tcode-hud .hud-label { font-weight: 600; letter-spacing: .03em; }
+#tcode-hud .hud-bar { height: 4px; margin: 4px 0 5px; border-radius: 2px; background: rgba(245,248,250,.18); overflow: hidden; }
+#tcode-hud .hud-fill { height: 100%; width: 0; transition: width .2s linear, background-color .2s; }
+#tcode-hud .hud-meta { display: flex; align-items: center; gap: 8px; color: #bfccd6; font-size: 11px; }
+#tcode-hud .hud-dots { margin-left: auto; display: inline-flex; gap: 4px; }
+#tcode-hud .hud-dot { width: 6px; height: 6px; border-radius: 50%; background: #ff7373; }
+#tcode-hud .hud-dot.on { background: #3dcc91; }
+@keyframes tcode-beat { 0%, 60%, 100% { transform: scale(1); } 20% { transform: scale(1.25); } }
+`;
+    document.head.appendChild(s);
+}
+
+function hudWanted(){
+    return settings.showHud !== false && !!boundPlayer && (hrLive() || settings.hr.enabled);
+}
+
+// The HUD element, created inside the current player's container (and moved if Stash
+// swapped the player). Null when there's nothing to attach to.
+function ensureHud(){
+    var hud = document.getElementById('tcode-hud');
+    var host = boundPlayer && boundPlayer.parentNode;
+    if(!host){ if(hud){ hud.remove(); } return null; }
+    if(hud && hud.parentNode !== host){ hud.remove(); hud = null; }
+    if(!hud){
+        injectHudStyles();
+        hud = el('div', {id: 'tcode-hud', 'aria-hidden': 'true'}, [
+            el('div', {class: 'hud-top'}, [
+                el('span', {class: 'hud-heart', text: '♥'}),
+                el('span', {class: 'hud-bpm'}),
+                el('span', {class: 'hud-ceiling'}),
+                el('span', {class: 'hud-decay'})
+            ]),
+            el('div', {class: 'hud-label'}),
+            el('div', {class: 'hud-bar'}, [el('div', {class: 'hud-fill'})]),
+            el('div', {class: 'hud-meta'}, [
+                el('span', {class: 'hud-edges'}),
+                el('span', {class: 'hud-climax'}),
+                el('span', {class: 'hud-dots'}, [el('span', {class: 'hud-dot usb', title: 'Device'}), el('span', {class: 'hud-dot hr', title: 'Heart rate'})])
+            ])
+        ]);
+        host.appendChild(hud);
+    }
+    return hud;
+}
+
+function phaseColor(g){
+    if(!g){ return HUD_COLORS.off; }
+    switch(g.phase){
+        case 'EDGE': case 'NO SIGNAL': return HUD_COLORS.stop;
+        case 'EASING': case 'REJOINING': return HUD_COLORS.warn;
+        case 'CLIMAX': return HUD_COLORS.climax;
+        case 'FREE': return HUD_COLORS.ok;
+        default: return HUD_COLORS.off;
+    }
+}
+
+// Time to the next climax marker ahead of the playhead, or "".
+function nextClimaxText(sceneMs){
+    if(sceneMs == null){ return ""; }
+    var ahead = climaxMarksMs.map(function(m){ return m.at; }).filter(function(at){ return at > sceneMs; });
+    if(!ahead.length){ return ""; }
+    return "Climax in " + formatTime((Math.min.apply(null, ahead) - sceneMs) / 1000);
+}
+
+function q(hud, sel){ return hud.querySelector(sel); }
+
+function updateHud(){
+    if(!hudWanted()){
+        var stale = document.getElementById('tcode-hud');
+        if(stale){ stale.remove(); }
+        return;
+    }
+    var hud = ensureHud();
+    if(!hud){ return; }
+    var g = lastGov;
+    var modulating = settings.hr.enabled && g && g.phase !== 'OFF';
+    var color = modulating ? phaseColor(g) : HUD_COLORS.off;
+
+    q(hud, '.hud-bpm').textContent = hr.bpm != null && hrLive() ? hr.bpm : "--";
+    var heart = q(hud, '.hud-heart');
+    heart.style.color = color;
+    heart.style.animationDuration = hrLive() && hr.bpm ? (60 / hr.bpm).toFixed(2) + 's' : '0s';
+    q(hud, '.hud-ceiling').textContent = modulating && g.ceiling != null ? "/ " + g.ceiling : "";
+    q(hud, '.hud-decay').textContent = modulating && g.decay ? "−" + g.decay : "";
+
+    var label = q(hud, '.hud-label');
+    label.textContent = modulating ? g.label : (hrLive() ? "Modulation off" : "No monitor");
+    label.style.color = color;
+    var bar = q(hud, '.hud-bar');
+    bar.style.display = modulating ? "" : "none";
+    if(modulating){
+        var fill = q(hud, '.hud-fill');
+        fill.style.width = Math.round(g.a * 100) + "%";
+        fill.style.backgroundColor = color;
+    }
+
+    q(hud, '.hud-edges').textContent = modulating ? hrSession.edges + (hrSession.edges === 1 ? " edge" : " edges") : "";
+    q(hud, '.hud-climax').textContent = modulating && g.phase !== 'CLIMAX' ? nextClimaxText(currentSceneMs()) : "";
+    q(hud, '.hud-dot.usb').classList.toggle('on', serialConnected);
+    q(hud, '.hud-dot.hr').classList.toggle('on', hrLive());
+}
+
+function startHud(){
+    if(hudTimer){ return; }
+    hudTimer = setInterval(function(){
+        try {
+            // Keep the governor current while paused too (watchdog, edges, the dialog's
+            // session line); during playback currentAction refreshes it on every tick.
+            if(!boundPlayer || boundPlayer.paused){ refreshGovernor(); } else { updateGovUi(); }
+            updateHud();
+        } catch(e) { debug("[TCode] HUD update failed: " + e); }
+    }, 250);
+}
+
+// ---------------------------------
+
+// --- STASH REQUESTS ---
+// Everything the script downloads comes from the Stash server this page belongs to, as a
+// plain same-origin fetch: the browser attaches Stash's session cookie when it has a
+// login, and no cross-site request permission is needed.
+
+// `url` resolved against the page, or null when it points at another site. Script URLs
+// can come from the page itself (the Interactive Tools dropdown), so never follow one
+// off-site with the user's cookies.
+function sameOriginUrl(url){
+    try {
+        var u = new URL(url, location.href);
+        return u.origin === location.origin ? u.href : null;
+    } catch(e) { return null; }
+}
+
+// GET a text file from Stash; resolves {status, response} (the body text).
+function getStashText(url){
+    return fetch(url, { credentials: 'same-origin' }).then(function(r){
+        return r.text().then(function(t){ return { status: r.status, response: t }; });
+    });
+}
+
+// Stash's own address for the scene's main funscript.
+function defaultFunscriptUrl(){
+    return location.origin + '/scene/' + getSceneId() + '/funscript';
+}
+
+// --- STASH GRAPHQL ---
+// A plain same-origin fetch: the browser attaches Stash's session cookie, which is
+// HttpOnly (invisible to document.cookie), so this also works when Stash has a login.
+function stashGql(query, variables){
+    return fetch(location.origin + '/graphql', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function(r){
+        if(!r.ok){ throw new Error("Stash returned " + r.status); }
+        return r.json();
+    }).then(function(j){
+        if(j.errors && j.errors.length){ throw new Error(j.errors[0].message); }
+        return j.data;
+    });
+}
+
+// --- CLIMAX MARKERS ---
+// Stash scene markers tagged with settings.hr.climaxTag release the HR limiter around
+// their time (see climaxFactor). A marker with an end time holds for its whole range.
+
+var climaxMarkers = [];     // [{id, seconds, end}] for the current scene, sorted
+var climaxSceneId = null;
+var climaxPollTimer = null;
+
+function isClimaxMarker(m, tag){
+    tag = String(tag || "").trim().toLowerCase();
+    if(!tag){ return false; }
+    var names = [m.primary_tag && m.primary_tag.name].concat((m.tags || []).map(function(t){ return t.name; }));
+    return names.some(function(n){ return n && n.toLowerCase() === tag; });
+}
+
+async function fetchClimaxMarkers(){
+    var id = getSceneId();
+    if(!isFinite(id)){ setClimaxMarkers(null, []); return; }
+    try {
+        var data = await stashGql("query($id: ID!){ findScene(id: $id){ scene_markers { id seconds end_seconds title primary_tag { name } tags { name } } } }",
+                                  { id: String(id) });
+        if(getSceneId() !== id){ return; } // navigated away meanwhile
+        var all = (data.findScene && data.findScene.scene_markers) || [];
+        var list = all.filter(function(m){ return isClimaxMarker(m, settings.hr.climaxTag); })
+                      .map(function(m){ return { id: m.id, seconds: m.seconds, end: m.end_seconds != null && m.end_seconds > m.seconds ? m.end_seconds : null }; })
+                      .sort(function(a, b){ return a.seconds - b.seconds; });
+        setClimaxMarkers(id, list);
+    } catch(e) {
+        debug("[TCode] Climax markers: " + e.message);
+    }
+}
+
+function setClimaxMarkers(sceneId, list){
+    var changed = sceneId !== climaxSceneId || JSON.stringify(list) !== JSON.stringify(climaxMarkers);
+    climaxSceneId = sceneId;
+    climaxMarkers = list;
+    climaxMarksMs = list.map(function(m){
+        return { at: Math.round(m.seconds * 1000), hold: m.end != null ? Math.round((m.end - m.seconds) * 1000) : null };
+    });
+    if(changed){
+        refreshSettingsTab('climax');
+        refreshGovernor();
+    }
+}
+
+// Re-read markers now and then, so ones added in Stash's own marker editor are picked up.
+function startClimaxPolling(){
+    if(climaxPollTimer){ return; }
+    climaxPollTimer = setInterval(function(){
+        if(location.href.indexOf('/scenes/') !== -1){ fetchClimaxMarkers(); }
+    }, 20000);
+}
+
+async function findOrCreateTag(name){
+    var found = await stashGql("query($name: String!){ findTags(tag_filter: { name: { value: $name, modifier: EQUALS } }, filter: { per_page: 1 }){ tags { id } } }",
+                               { name: name });
+    if(found.findTags.tags.length){ return found.findTags.tags[0].id; }
+    var created = await stashGql("mutation($name: String!){ tagCreate(input: { name: $name }){ id } }", { name: name });
+    return created.tagCreate.id;
+}
+
+// Add a climax marker at the current playhead (creating the tag if needed).
+async function markClimaxHere(){
+    var id = getSceneId();
+    if(!isFinite(id) || !boundPlayer){ showToast("No Scene", "Open a scene to add a marker", "warning"); return; }
+    var seconds = Math.round((boundPlayer.currentTime + streamOffsetMs / 1000) * 10) / 10;
+    var tag = String(settings.hr.climaxTag || "").trim() || "Climax";
+    try {
+        var tagId = await findOrCreateTag(tag);
+        await stashGql("mutation($input: SceneMarkerCreateInput!){ sceneMarkerCreate(input: $input){ id } }",
+                       { input: { title: tag, seconds: seconds, scene_id: String(id), primary_tag_id: tagId } });
+        showToast("Climax Marker Added", "At " + formatTime(seconds) + ". Reload to see it in Stash's Markers tab.", "success", 5000);
+        await fetchClimaxMarkers();
+    } catch(e) {
+        showToast("Couldn't Add Marker", e.message, "error");
+    }
+}
+
+// Jump the Stash player to a scene time. video.js takes scene time and copes with
+// transcoded streams, so go through it when it's reachable (it lives in the page's
+// JavaScript world, hence unsafeWindow); otherwise set the <video> directly.
+function seekScene(seconds){
+    var host = unsafeWindow.document.querySelector('.video-js');
+    var vjs = host && host.player;
+    if(vjs && typeof vjs.currentTime === 'function'){ vjs.currentTime(seconds); return; }
+    if(boundPlayer){ boundPlayer.currentTime = Math.max(0, seconds - streamOffsetMs / 1000); }
+}
+
+function formatTime(sec){
+    sec = Math.max(0, Math.round(sec));
+    var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(s).padStart(2, '0');
 }
 
 // ---------------------------------
 
 /* Stash Integration */
 function fetchSceneInfo(id){
-    GM_xmlhttpRequest({
-        method: "POST",
-        url: location.protocol + '//' + location.host + '/graphql',
-        data: '{"operationName":"FindScene","variables":{"id":"' + id + '"},"query":"query FindScene($id: ID!, $checksum: String) {\\n  findScene(id: $id, checksum: $checksum) {\\n    ...SceneData\\n  }\\n}\\n\\nfragment SceneData on Scene {\\n  files {\\n    ...VideoFileData\\n  }\\n  paths {\\n    funscript\\n}\\n}\\n\\nfragment VideoFileData on VideoFile {\\n  path\\n}"}',
-        cookie: document.cookie,
-        anonymous: true,
-        headers: { "Content-Type": "application/json" },
-        onload: function(response){
-            var json = JSON.parse(response.response);
-            if(json.data && json.data.findScene && json.data.findScene.files.length > 0){
-                video = json.data.findScene.files[0].path;
+    stashGql("query($id: ID!){ findScene(id: $id){ files { path } } }", { id: String(id) })
+        .then(function(data){
+            var scene = data.findScene;
+            if(scene && scene.files.length > 0){
+                video = scene.files[0].path;
                 debug("Video: " + video);
                 fetchAllFunscripts();
             }
-        }
-    });
+        })
+        .catch(function(e){ console.error("[TCode] Couldn't load the scene:", e); });
 }
 
 function initAxis(name){
     if(AXIS[name]){ return -1; }
     AXIS[name] = new Object();
     AXIS[name].index = 0; AXIS[name].start = 0; AXIS[name].end = 0; AXIS[name].scriptLoaded = false;
-    AXIS[name].acts = null; AXIS[name].limits = null; AXIS[name].altLimits = null;
+    AXIS[name].acts = null; AXIS[name].limits = null;
 }
 
 function fetchAllFunscripts(){
@@ -1194,20 +1686,9 @@ function parseMultiAxisFunscript(json) {
 // Fetch the main funscript file first, then check if it's multi-axis
 function fetchMainFunscript() {
     var chosenScript = document.querySelector('#stash-interactive-tools-select-funscripts');
-    var url = "";
+    var url = (chosenScript && sameOriginUrl(chosenScript.value)) || defaultFunscriptUrl();
 
-    if (chosenScript) {
-        url = chosenScript.value;
-    } else {
-        url = location.protocol + '//' + location.host + '/scene/' + getSceneId() + '/funscript';
-    }
-
-    GM_xmlhttpRequest({
-        method: "GET",
-        url: url,
-        cookie: document.cookie,
-        anonymous: true,
-        onload: function(response) {
+    getStashText(url).then(function(response) {
             if (response.status == 200) {
                 try {
                     var json = JSON.parse(response.response);
@@ -1220,17 +1701,9 @@ function fetchMainFunscript() {
                         debug("Successfully loaded multi-axis funscript with axes: " + multiAxisResult.join(", "));
                         showToast("Multi-Axis Script Loaded", "Parsed " + multiAxisResult.length + " axes: " + multiAxisResult.join(", "), "success");
 
-                        // For any axes not found in the multi-axis file, try fetching separate files or use random
+                        // For any axes not found in the multi-axis file, try their separate files
                         for (var axis in AXIS) {
-                            if (!AXIS[axis].scriptLoaded) {
-                                if (settings.axes[axis].random != "") {
-                                    generateRandomMotion(axis, settings.axes[axis].random);
-                                    AXIS[axis].scriptLoaded = true;
-                                } else {
-                                    // Try fetching individual axis file
-                                    fetchFunscript(axis, true);
-                                }
-                            }
+                            if (!AXIS[axis].scriptLoaded) { fetchFunscript(axis, true); }
                         }
                     } else {
                         // Single-axis file (legacy format) - load as L0
@@ -1246,18 +1719,7 @@ function fetchMainFunscript() {
 
                         // Fetch other axes from separate files
                         for (var axis in AXIS) {
-                            if (!AXIS[axis].scriptLoaded) {
-                                if (settings.axes[axis].random != "") {
-                                    if (!AXIS[settings.axes[axis].random].scriptLoaded) {
-                                        fetchFunscript(axis);
-                                    } else {
-                                        generateRandomMotion(axis, settings.axes[axis].random);
-                                        AXIS[axis].scriptLoaded = true;
-                                    }
-                                } else if (axis !== "L0") {
-                                    fetchFunscript(axis);
-                                }
-                            }
+                            if (!AXIS[axis].scriptLoaded && axis !== "L0") { fetchFunscript(axis); }
                         }
                     }
                 } catch (error) {
@@ -1274,107 +1736,339 @@ function fetchMainFunscript() {
 
             // Clean up dropdown options
             if (chosenScript) { cleanUpOptions(chosenScript); }
-        }
-    });
+    }).catch(function(e) { console.error("[TCode] Couldn't load the funscript:", e); });
 }
 
 // Fallback: fetch individual axis files
 function fetchIndividualAxisFiles() {
     for (var axis in AXIS) {
-        if (settings.axes[axis].random != "") {
-            if (!AXIS[settings.axes[axis].random].scriptLoaded) {
-                fetchFunscript(axis);
-            }
-        }
-        if (!AXIS[axis].scriptLoaded) {
-            fetchFunscript(axis);
-        }
+        if (!AXIS[axis].scriptLoaded) { fetchFunscript(axis); }
     }
     var chosenScript = document.querySelector('#stash-interactive-tools-select-funscripts');
     if (chosenScript) { cleanUpOptions(chosenScript); }
 }
 
-function generateRandomMotion(axis, relatedAxis=""){
-    if(AXIS[axis].acts != null){ return -1; }
-    var interval = -1;
-    var modifier = Math.random() * (1500 - 250) + 250;
-    if(Math.random() < 0.5){ modifier * -1; }
-    if(AXIS[relatedAxis]){
-        if(AXIS[relatedAxis].acts == null && generateRandomMotion.caller != ""){
-            setTimeout(function(){ generateRandomMotion(axis, relatedAxis) }, 500);
-            return -1;
-        }
-        AXIS[axis].acts = new Array();
-        for(var i=AXIS[relatedAxis].index;i<AXIS[relatedAxis].acts.length;i++){
-            AXIS[axis].acts[i] = new Object();
-            interval = Math.round(AXIS[relatedAxis].acts[i].at + modifier);
-            if(interval < 0){ interval = 0; }
-            AXIS[axis].acts[i].at = interval;
-            AXIS[axis].acts[i].pos = AXIS[relatedAxis].acts[i].pos;
-        }
-        AXIS[axis].start = AXIS[axis].acts[0].at;
-        AXIS[axis].end = AXIS[axis].acts[AXIS[axis].acts.length-1].at;
-    }
-}
-
 function fetchFunscript(axis, force=false){
     if(scriptList == null){
-        GM_xmlhttpRequest({
-            method: "POST",
-            url: location.protocol + '//' + location.host + '/graphql',
-            data: '{"operationName":"RunPluginOperation","variables":{"plugin_id":"StashInteractiveTools","args":{"mode":"init","scene_id":"' + getSceneId() + '","origin":"' + location.origin + '"}},"query":"mutation RunPluginOperation($plugin_id: ID!, $args: Map) {\\n  runPluginOperation(plugin_id: $plugin_id, args: $args)\\n}"}',
-            cookie: document.cookie,
-            anonymous: true,
-            headers: { "Content-Type": "application/json" },
-            onload: function(response){
-                var json = JSON.parse(response.response);
-                if(json.data && json.data.runPluginOperation){
-                    scriptList = json.data.runPluginOperation.scripts;
-                    fetchFunscript(axis);
-                }
-            }
-        });
+        // Ask the Stash Interactive Tools plugin for the scene's script list, once: every
+        // axis lands here before the first answer, and each plugin call can start a process
+        // on the server. Without the plugin (or if it fails) carry on with an empty list and
+        // try the default paths.
+        if(!scriptListRequest){
+            scriptListRequest = stashGql("mutation($plugin_id: ID!, $args: Map){ runPluginOperation(plugin_id: $plugin_id, args: $args) }",
+                     { plugin_id: "StashInteractiveTools", args: { mode: "init", scene_id: String(getSceneId()), origin: location.origin } })
+                .then(function(data){ scriptList = (data.runPluginOperation && data.runPluginOperation.scripts) || []; })
+                .catch(function(e){ debug("[TCode] StashInteractiveTools unavailable: " + e.message); scriptList = []; })
+                .then(function(){ scriptListRequest = null; });
+        }
+        scriptListRequest.then(function(){ fetchFunscript(axis); });
     }else{
         var chosenScript = document.querySelector('#stash-interactive-tools-select-funscripts');
         if(!chosenScript && !force){ setTimeout(function(){fetchFunscript(axis, true)}, 500); return -1; }
-        var url = "";
-        if(chosenScript){ url = chosenScript.value.split('.funscript')[0]; }
-        else{ url = location.protocol + '//' + location.host + '/scene/' + getSceneId() + '/funscript'; }
+        var chosen = chosenScript && sameOriginUrl(chosenScript.value);
+        var url = chosen ? chosen.split('.funscript')[0] : defaultFunscriptUrl();
 
         switch(axis){
             case "L1": url += ".surge"; break; case "L2": url += ".sway"; break; case "R0": url += ".twist"; break; case "R1": url += ".roll"; break; case "R2": url += ".pitch"; break;
         }
-        if(chosenScript){ url = url + ".funscript"; }
-        GM_xmlhttpRequest({
-            method: "GET", url: url, cookie: document.cookie, anonymous: true,
-            onload: function(response){
-                if(response.status == 200){
-                    if(!AXIS[axis]){ AXIS[axis] = new Object(); }
-                    try { AXIS[axis].acts = JSON.parse(response.response).actions; }
-                    catch (error) { debug("JSON error"); }
-                    if(AXIS[axis].acts == null){ fetchFunscript(axis, force); return -1; }
-                    AXIS[axis].start = AXIS[axis].acts[0].at;
-                    AXIS[axis].end = AXIS[axis].acts[AXIS[axis].acts.length-1].at;
-                    showToast("Axis Loaded", axis + " with " + AXIS[axis].acts.length + " actions", "success", 3000);
-                }else{
-                    if(settings.axes[axis].random != ""){
-                        generateRandomMotion(axis, settings.axes[axis].random);
-                        showToast("Random Generated", axis + " (based on " + settings.axes[axis].random + ")", "info", 3000);
-                    }
-                    else{ AXIS[axis].acts = null; }
-                }
-                AXIS[axis].scriptLoaded = true;
+        if(chosen){ url = url + ".funscript"; }
+        getStashText(url).then(function(response){
+            if(!AXIS[axis]){ AXIS[axis] = new Object(); }
+            var acts = null;
+            if(response.status == 200){
+                try { acts = JSON.parse(response.response).actions; }
+                catch (error) { debug("[TCode] " + axis + " script isn't valid JSON"); }
             }
-        });
+            // No usable actions (missing file, or not a funscript): this axis has no script.
+            // Used to retry here forever when a 200 response held no actions.
+            if(Array.isArray(acts) && acts.length > 0){
+                AXIS[axis].acts = acts;
+                AXIS[axis].start = acts[0].at;
+                AXIS[axis].end = acts[acts.length-1].at;
+                showToast("Axis Loaded", axis + " with " + acts.length + " actions", "success", 3000);
+            }else{
+                AXIS[axis].acts = null;
+            }
+            AXIS[axis].scriptLoaded = true;
+        }).catch(function(e){ debug("[TCode] " + axis + " script request failed: " + e); });
     }
 }
 
-function listAxes(exclude=""){
-    var keys = Object.keys(AXIS);
-    let removeAxis = keys.indexOf(exclude);
-    if (removeAxis !== -1) { keys.splice(removeAxis, 1); }
-    return keys;
+// --- HR GOVERNOR ---
+// Heart rate decides how much of each stroke the device may play: the allowance `a`,
+// 0-1. Inspired by EdgeLoop's biofeedback limiter (github.com/marshallmims/edgeloop),
+// reimplemented here:
+//   - Approach band: in the last `band` BPM below the ceiling, `a` falls linearly from
+//     1 to the floor, so strokes shorten as you climb.
+//   - Edge: at the ceiling `a` is 0 (the stroker parks at the bottom of its range) until
+//     HR drops EDGE_RELEASE_BPM below it, then ramps back in over `rejoinSec`.
+//   - Adaptive decay: every N edges the ceiling drops M BPM, never below a floor.
+//   - Climax marks: around a marked time `a` is lifted toward 1 regardless of HR.
+//   - Watchdog: with modulation on and no fresh reading, `a` is 0.
+// The pure functions below take everything as arguments so they can be tested alone.
+
+var EDGE_RELEASE_BPM = 5;   // hysteresis: an edge only clears this far below the ceiling
+var REJOIN_START = 0.16;    // allowance at the moment an edge clears
+
+// The session (edge count, which drives decay; whether we're at the edge; when the last
+// edge cleared) is kept in sessionStorage: it survives a page reload, say when another
+// plugin misbehaves, but not closing the tab, which is what ends a session.
+var HR_SESSION_KEY = 'stash-tcode:hrSession';
+var hrSession = loadHrSession();
+var climaxMarksMs = [];     // climax mark times for the current scene (scene ms)
+var lastGov = null;         // most recent governor result, for the UI
+
+// The ceiling after adaptive decay. The floor can stop the decay but never raise the
+// ceiling above the edge HR you set. Returns {ceiling, decay}.
+function workingCeiling(cfg, edges){
+    var typed = cfg.edgeHr;
+    if(!cfg.decay || !(edges > 0)){ return { ceiling: typed, decay: 0 }; }
+    var drop = Math.floor(edges / Math.max(1, cfg.decayEvery)) * cfg.decayBpm;
+    var ceiling = Math.min(typed, Math.max(cfg.decayFloor, typed - drop));
+    return { ceiling: ceiling, decay: typed - ceiling };
 }
+
+// 1 below the band, falling linearly to floorPct/100 at the ceiling.
+function approachFactor(bpm, ceiling, band, floorPct){
+    if(!(band > 0)){ return 1; }
+    var s = Math.max(0, Math.min(1, (bpm - (ceiling - band)) / band));
+    return 1 - s * (1 - floorPct / 100);
+}
+
+// Cap on the allowance `sinceSec` seconds after an edge cleared: eases from REJOIN_START
+// up to 1 over rejoinSec. No ramp running (null) or a zero-length ramp is 1.
+function rejoinFactor(sinceSec, rejoinSec){
+    if(sinceSec == null || !(rejoinSec > 0)){ return 1; }
+    var t = Math.max(0, Math.min(1, sinceSec / rejoinSec));
+    var eased = t * t * (3 - 2 * t); // smoothstep
+    return REJOIN_START + (1 - REJOIN_START) * eased;
+}
+
+// How far climax marks have taken over at sceneMs, 0-1: climbs over rampMs before a
+// mark, holds at 1 for holdMs, then eases back over easeMs. The strongest mark wins.
+// A mark is a time in ms, or {at, hold} where a non-null hold overrides holdMs (a
+// Stash marker with an end time holds for its whole range).
+function climaxFactor(sceneMs, marks, rampMs, holdMs, easeMs){
+    if(sceneMs == null || !marks || !marks.length){ return 0; }
+    var k = 0;
+    for(var mark of marks){
+        var at = typeof mark === 'number' ? mark : mark.at;
+        var hold = typeof mark === 'number' || mark.hold == null ? holdMs : mark.hold;
+        var d = at - sceneMs; // > 0: mark still ahead
+        if(d > 0){
+            if(rampMs > 0 && d <= rampMs){ k = Math.max(k, 1 - d / rampMs); }
+        }else if(-d <= hold){
+            k = 1;
+        }else if(easeMs > 0 && -d <= hold + easeMs){
+            k = Math.max(k, 1 - (-d - hold) / easeMs);
+        }
+    }
+    return Math.max(0, Math.min(1, k));
+}
+
+function loadHrSession(){
+    try {
+        var saved = JSON.parse(window.sessionStorage.getItem(HR_SESSION_KEY) || 'null');
+        if(saved && typeof saved.edges === 'number'){
+            return { edged: !!saved.edged, edges: Math.max(0, Math.floor(saved.edges)),
+                     releasedAt: typeof saved.releasedAt === 'number' ? saved.releasedAt : null };
+        }
+    } catch(e) {} // unavailable or corrupt: start fresh
+    return { edged: false, edges: 0, releasedAt: null };
+}
+
+function saveHrSession(){
+    try { window.sessionStorage.setItem(HR_SESSION_KEY, JSON.stringify(hrSession)); } catch(e) {}
+}
+
+// Advance the edge state machine for one reading. Rising through the ceiling counts an
+// edge (but not while a climax mark has taken over); it clears below the release band.
+function updateEdgeState(session, bpm, ceiling, climaxActive, now){
+    if(bpm >= ceiling){
+        if(!session.edged && !climaxActive){
+            session.edged = true;
+            session.edges++;
+            return 'edge';
+        }
+    }else if(session.edged && bpm < ceiling - EDGE_RELEASE_BPM){
+        session.edged = false;
+        session.releasedAt = now;
+        return 'release';
+    }
+    return null;
+}
+
+// The governor for this moment. Returns {a, phase, label, ceiling, decay, climax, bpm}.
+//   phase: OFF | NO MONITOR | NO SIGNAL | FREE | EASING | EDGE | REJOINING | CLIMAX
+function computeAllowance(now, sceneMs){
+    var cfg = settings.hr;
+    var res = { a: 1, phase: 'OFF', label: 'OFF', ceiling: null, decay: 0, climax: 0, bpm: hr.bpm };
+    if(!cfg.enabled){ return res; }
+    var wc = workingCeiling(cfg, hrSession.edges);
+    res.ceiling = wc.ceiling;
+    res.decay = wc.decay;
+    res.climax = climaxFactor(sceneMs, climaxMarksMs, cfg.climaxRampSec * 1000, cfg.climaxHoldSec * 1000, cfg.climaxEaseSec * 1000);
+
+    if(hr.status === 'off'){
+        // No monitor at all: play the script as-is rather than refuse to move.
+        res.phase = res.label = 'NO MONITOR';
+        return res;
+    }
+    if(hr.bpm == null || now - hr.at > cfg.timeoutSec * 1000){
+        // Watchdog: a monitor that has gone quiet stops the device.
+        res.a = 0;
+        res.phase = res.label = 'NO SIGNAL';
+        return res;
+    }
+
+    var event = updateEdgeState(hrSession, hr.bpm, wc.ceiling, res.climax > 0, now);
+    if(event){ saveHrSession(); }
+    if(event === 'edge'){ onEdge(); }
+
+    var base;
+    if(hrSession.edged){
+        base = 0;
+        res.phase = res.label = 'EDGE';
+    }else{
+        base = approachFactor(hr.bpm, wc.ceiling, cfg.band, cfg.floor);
+        res.phase = base < 1 ? 'EASING' : 'FREE';
+        var since = hrSession.releasedAt != null ? (now - hrSession.releasedAt) / 1000 : null;
+        var r = rejoinFactor(since, cfg.rejoinSec);
+        if(r < base){
+            base = r;
+            res.phase = 'REJOINING';
+            res.label = 'REJOINING ' + Math.max(1, Math.ceil(cfg.rejoinSec - since)) + ' s';
+        }else if(r >= 1 && hrSession.releasedAt != null){
+            hrSession.releasedAt = null; // ramp finished
+            saveHrSession();
+        }
+        if(res.phase === 'EASING'){ res.label = 'EASING ' + Math.round(base * 100) + '%'; }
+        if(res.phase === 'FREE'){ res.label = 'FREE'; }
+    }
+    if(res.climax > 0){
+        base = base + (1 - base) * res.climax;
+        res.phase = 'CLIMAX';
+        res.label = 'CLIMAX ' + Math.round(res.climax * 100) + '%';
+    }
+    res.a = base;
+    return res;
+}
+
+// Scale one funscript position (0-100, after invert) by the allowance. Stroke shortens
+// from the bottom of its range; every other axis shrinks toward its home position.
+function shapePosition(axis, pos, a){
+    if(a >= 1){ return pos; }
+    if(axis === "L0"){ return pos * a; }
+    var lo = parseInt(AXIS[axis].limits[0]), hi = parseInt(AXIS[axis].limits[1]);
+    var home = hi > lo ? (getCenter(axis) - lo) / (hi - lo) * 100 : 50;
+    return home + (pos - home) * a;
+}
+
+function onEdge(){
+    showToast("Edge " + hrSession.edges, "Holding until your heart rate drops " + EDGE_RELEASE_BPM + " BPM", "warning", 3000);
+    debug("[TCode] Edge " + hrSession.edges + " at " + hr.bpm + " BPM");
+}
+
+function resetHrSession(){
+    hrSession.edged = false;
+    hrSession.edges = 0;
+    hrSession.releasedAt = null;
+    saveHrSession();
+    refreshGovernor();
+}
+
+// Scene time of the bound player in ms (transcode offset included), or null.
+function currentSceneMs(){
+    if(!boundPlayer){ return null; }
+    return Math.floor(boundPlayer.currentTime * 1000) + streamOffsetMs + (parseInt(settings.sync) || 0);
+}
+
+// Re-evaluate outside playback (on each HR reading, settings changes) so edges are
+// counted and the UI stays current even while the video is paused.
+function refreshGovernor(){
+    lastGov = computeAllowance(Date.now(), currentSceneMs());
+    updateGovUi();
+}
+
+function govStatusText(g){
+    if(!g || g.phase === 'OFF'){ return "Off"; }
+    var parts = [];
+    if(g.bpm != null && g.phase !== 'NO MONITOR'){ parts.push(g.bpm + " BPM"); }
+    if(g.ceiling != null){ parts.push("ceiling " + g.ceiling + (g.decay ? " (−" + g.decay + ")" : "")); }
+    parts.push(hrSession.edges + (hrSession.edges === 1 ? " edge" : " edges"));
+    parts.push(g.label);
+    return parts.join(" · ");
+}
+
+function updateGovUi(){
+    var line = document.getElementById('tcode-gov-status');
+    if(line){ line.textContent = govStatusText(lastGov); }
+}
+
+// ---------------------------------
+
+// --- AUTO MOTION ---
+// An axis with auto motion on, and no script for the current scene, follows a sine wave
+// across its range at its own frequency. A new target goes out every SINE_STEP_MS and
+// the device interpolates between them, so the motion is smooth rather than a zigzag.
+// It runs on video time, so it pauses with the video, and goes through the same
+// invert / heart-rate shaping as scripted motion.
+
+var SINE_STEP_MS = 50;
+var SINE_REJOIN_MS = 500;   // first move after a seek or start: slow, never a slam
+var AUTO_HZ_MIN = 0.05;
+var AUTO_HZ_MAX = 3;
+
+// Sine position (0-100) at sceneMs. Each axis starts at a different point in its
+// cycle so axes sharing a frequency don't move in lockstep.
+function sinePosition(hz, sceneMs, axisIndex){
+    hz = Math.max(AUTO_HZ_MIN, Math.min(AUTO_HZ_MAX, Number(hz) || 0.5));
+    return 50 + 50 * Math.sin(2 * Math.PI * hz * sceneMs / 1000 + axisIndex * 0.7);
+}
+
+function autoMotion(axis, ms, jumped, a){
+    var ax = AXIS[axis];
+    // Moves chain end to end: the next one goes out when the device reaches the last
+    // target (ax.sineDue), so a slow rejoin move is never cut short by a quick step.
+    // A seek, or the playhead landing far from the chain, starts over with a rejoin.
+    var fresh = jumped || ax.sineDue == null || ms < ax.sineDue - SINE_REJOIN_MS || ms > ax.sineDue + SINE_REJOIN_MS;
+    if(!fresh && ms < ax.sineDue){ return; }
+    var interval = fresh ? SINE_REJOIN_MS : SINE_STEP_MS;
+    ax.sineDue = ms + interval;
+    var pos = sinePosition(settings.axes[axis].autoHz, ms + interval, AXIS_LIST.indexOf(axis));
+    if(settings.axes[axis].invert){ pos = 100 - pos; }
+    pos = shapePosition(axis, pos, a);
+    var lo = parseInt(ax.limits[0]), hi = parseInt(ax.limits[1]);
+    queueMove(axis, Math.round((pos / 100) * (hi - lo) + lo), interval);
+}
+
+// ---------------------------------
+
+// --- SPEED LIMIT ---
+// Caps how fast an axis may travel, per axis. The limit is stored in full travels per
+// second (1 = the whole 0-9999 range in one second; MultiFunPlayer's "u/s") and shown as
+// % of full travel per second. A move that would be faster has its end pulled back toward where the
+// axis is, so it fits in the same time. Timing never changes, so playback stays in sync,
+// and the next move starts from the clipped point.
+
+var MAX_SPEED_MIN = 0.25;
+var MAX_SPEED_MAX = 20;
+
+function limitSpeed(from, to, intervalMs, maxUps){
+    if(from == null || !(maxUps > 0)){ return to; }
+    var reach = maxUps * 9999 * Math.max(0, intervalMs) / 1000;
+    var d = to - from;
+    if(Math.abs(d) <= reach){ return to; }
+    return Math.round(from + Math.sign(d) * reach);
+}
+
+// Where each axis was last sent is unknown after (re)connecting.
+function forgetAxisPositions(){
+    for(var ax in AXIS){ AXIS[ax].lastPos = null; }
+}
+
+// ---------------------------------
+
 
 // Clamp helper: returns an integer inside [0, 9999].
 function clamp9999(v){
@@ -1409,13 +2103,23 @@ function centerAxis(axis){
     if(!AXIS[axis].limits || AXIS[axis].limits == null){ setTimeout(function(){ centerAxis(axis)}, 500); return -1; }
     var ramp = parseInt(settings.centerTime);
     if(!isFinite(ramp) || ramp < 0){ ramp = 1000; }
-    sendTCode(axis + String(getCenter(axis)).padStart(4, '0') + "I" + ramp + '\n');
+    var home = getCenter(axis);
+    var from = AXIS[axis].lastPos;
+    // Homing is slowed rather than shortened by the speed limit: it has to arrive. An
+    // unknown start position is treated as the far end of travel.
+    var cfg = settings.axes[axis];
+    if(cfg.speedLimit && cfg.maxSpeed > 0){
+        var dist = from != null ? Math.abs(home - from) : Math.max(home, 9999 - home);
+        ramp = Math.max(ramp, Math.ceil(dist / (cfg.maxSpeed * 9999) * 1000));
+    }
+    AXIS[axis].lastPos = home;
+    sendTCode(axis + String(home).padStart(4, '0') + "I" + ramp + '\n');
 }
 
 // Park every enabled axis now (used by the Center Now button).
 function centerAll(){
     if(!serialConnected){ showToast("Not Connected", "Connect over USB first", "warning"); return -1; }
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => centerAxis(ax));
+    AXIS_LIST.forEach(ax => centerAxis(ax));
 }
 
 function queueMove(axis, pos, int){
@@ -1427,6 +2131,14 @@ function queueMove(axis, pos, int){
     pos = clamp9999(pos);
     int = Math.round(Number(int));
     if(!isFinite(int) || int < 0){ int = 0; }
+    var cfg = settings.axes[axis];
+    if(cfg && cfg.speedLimit){
+        pos = limitSpeed(AXIS[axis].lastPos, pos, int, cfg.maxSpeed);
+        // Coming from outside a range that was just narrowed, the limited step can still
+        // be outside it; the range is the hard limit.
+        if(pos > hi){ pos = hi; } else if(pos < lo){ pos = lo; }
+    }
+    AXIS[axis].lastPos = pos;
     // TCode magnitude is the digits after "0." -- send all four so the axis can reach
     // its real endpoints (two digits capped every axis at 0.99 and quantised to 1%).
     var cmd = axis + String(pos).padStart(4, '0') + "I" + int;
@@ -1435,9 +2147,16 @@ function queueMove(axis, pos, int){
     // it the firmware reads "L05000I100R15000I100" as a single malformed L0 command and
     // silently drops every axis after the first.
     sendTCode(cmd + " ");
+    tickQueued = true;
 }
 
-function move(){ if(serialConnected){ sendTCode('\n'); } }
+// Ends the line of commands queued during this playback tick. Nothing queued, nothing
+// sent: the tick runs every 10 ms and an empty line would just be serial noise.
+var tickQueued = false;
+function move(){
+    if(serialConnected && tickQueued){ sendTCode('\n'); }
+    tickQueued = false;
+}
 
 // Binary search for the first keyframe strictly after ms. Returns acts.length when the
 // playhead is past the end. Used to re-seat an axis after any non-linear jump.
@@ -1460,8 +2179,14 @@ function currentAction(ms){
         // This no longer depends on the "seeking" event firing.
         var jumped = (lastActionMs === null) || (ms < lastActionMs) || (ms - lastActionMs > SEEK_THRESHOLD_MS);
         lastActionMs = ms;
+        var gov = lastGov = computeAllowance(Date.now(), ms);
         for(var x in AXIS){
-            if(!settings.axes[x].enabled || AXIS[x].acts == null || AXIS[x].limits == null){ continue; }
+            if(!settings.axes[x].enabled || AXIS[x].limits == null){ continue; }
+            if(AXIS[x].acts == null){
+                // No script for this axis in this scene: auto motion fills in, if it's on.
+                if(settings.axes[x].auto){ autoMotion(x, ms, jumped, gov.a); }
+                continue;
+            }
             if(jumped){ AXIS[x].index = seekIndex(AXIS[x].acts, ms); }
             // Re-seat rather than give up when the index has run off the end (video
             // ended, or a seek left it stranded). The old guard skipped the whole
@@ -1476,6 +2201,7 @@ function currentAction(ms){
                     if(AXIS[x].acts[i] && AXIS[x].acts[i].at > ms){
                         var pos = AXIS[x].acts[i].pos;
                         if (settings.axes[x].invert) { pos = 100 - pos; }
+                        pos = shapePosition(x, pos, gov.a); // heart-rate modulation (a = 1 when off)
                         // Map funscript 0-100 straight onto the axis range in device units
                         // (0-9999). The old "/100" collapsed this to 0-99 before sending.
                         var act = Math.round(((pos/100) * (AXIS[x].limits[1] - AXIS[x].limits[0])) + parseInt(AXIS[x].limits[0]));
@@ -1529,13 +2255,45 @@ function updateTime(player){
     }
 }
 
+// One watcher for the whole page lifetime, started at load, independent of the device:
+// the climax markers and overlay need the player even with nothing connected.
+var playerWatchStarted = false;
+function startPlayerWatch(){
+    if(playerWatchStarted){ return; }
+    playerWatchStarted = true;
+    waitForVideoPlayer();
+}
+
+// The watcher reschedules itself through here so there's only ever one pending tick.
+var watchTimer = null;
+function scheduleWatch(delay){
+    clearTimeout(watchTimer);
+    watchTimer = setTimeout(waitForVideoPlayer, delay);
+}
+function onPlayerPlay(){ scheduleWatch(0); } // back to the fast tick the moment playback starts
+
+function unbindPlayer(){
+    if(!boundPlayer){ return; }
+    boundPlayer.removeEventListener("play", onPlayerPlay, false);
+    boundPlayer.removeEventListener("seeking", resetIndex, false);
+    boundPlayer.removeEventListener("seeked", resetIndex, false);
+    boundPlayer.removeEventListener("ended", resetIndex, false);
+    boundPlayer.removeEventListener("emptied", resetIndex, false);
+    boundPlayer = null;
+}
+
 function waitForVideoPlayer(){
-    var player = document.querySelector('video');
+    // Only the scene player counts: other pages (the scene wall, marker lists) have
+    // preview <video>s of their own.
+    // While the bound player is still in the page, skip the DOM lookups.
+    var player = !isFinite(getSceneId()) ? null
+        : (boundPlayer && boundPlayer.isConnected) ? boundPlayer
+        : (document.querySelector('#VideoJsPlayer_html5_api') || document.querySelector('video.vjs-tech') || document.querySelector('video'));
     if(!player){
         // The element can disappear between scenes; drop the stale binding so the
         // replacement gets wired up instead of leaving listeners on a detached node.
-        boundPlayer = null;
-        setTimeout(waitForVideoPlayer, 500);
+        unbindPlayer();
+        scheduleWatch(500);
         return;
     }
     // Compare identity, not a boolean. videoPlayerLoaded was set once and never
@@ -1543,12 +2301,8 @@ function waitForVideoPlayer(){
     // to the old element and seeks stopped resetting the index -- which is why only a
     // page navigation restored playback.
     if(boundPlayer !== player){
-        if(boundPlayer){
-            boundPlayer.removeEventListener("seeking", resetIndex, false);
-            boundPlayer.removeEventListener("seeked", resetIndex, false);
-            boundPlayer.removeEventListener("ended", resetIndex, false);
-            boundPlayer.removeEventListener("emptied", resetIndex, false);
-        }
+        unbindPlayer();
+        player.addEventListener("play", onPlayerPlay, false);
         player.addEventListener("seeking", resetIndex, false);
         // "seeking" doesn't fire in every path that moves the playhead (notably
         // resuming after the video ended), so also reset on completion.
@@ -1563,16 +2317,14 @@ function waitForVideoPlayer(){
         }
     }
     updateTime(player);
-    setTimeout(waitForVideoPlayer, 10);
-}
-
-function setInitials(axis="L0"){
-    if(AXIS[axis] && AXIS[axis].limits != null){ AXIS[axis].altLimits = AXIS[axis].limits.slice(0); }
+    // 10 ms ticks while playing; a paused player only needs checking a few times a second.
+    scheduleWatch(player.paused ? 250 : 10);
 }
 
 function processLimits(data){
     var values;
     var axesFound = [];
+    var learned = false;
     console.log(`[TCode] Device returned limits:`, data);
     // Was data.length-1, which silently discarded the last axis reported by D2 when the
     // reply had no trailing blank line (the plain-text path filters blanks out already).
@@ -1585,12 +2337,14 @@ function processLimits(data){
                 console.log(`[TCode] Keeping saved limits for ${values[0]} (ignoring device values ${values[1]} - ${values[2]})`);
             }else{
                 AXIS[values[0]].limits = new Array(values[1], values[2]);
-                AXIS[values[0]].altLimits = new Array(values[1], values[2]);
                 console.log(`[TCode] Set ${values[0]} limits: ${values[1]} - ${values[2]}`);
             }
 
-            // Auto-enable axes that the device supports (L and R axes only, not V or A)
-            if(/^[LR]\d+$/.test(values[0]) && settings.axes[values[0]]){
+            // Auto-enable an L/R axis the first time a device reports it. After that the
+            // user's on/off choice stands: switching an axis off must survive reconnects.
+            if(/^[LR]\d+$/.test(values[0]) && settings.axes[values[0]] && settings.knownAxes.indexOf(values[0]) === -1){
+                settings.knownAxes.push(values[0]);
+                learned = true;
                 if(!settings.axes[values[0]].enabled){
                     settings.axes[values[0]].enabled = true;
                     axesFound.push(values[0]);
@@ -1601,8 +2355,9 @@ function processLimits(data){
     }
     if(axesFound.length > 0){
         showToast("Axes Auto-Enabled", "Enabled " + axesFound.join(", ") + " based on device capabilities", "info");
-        saveSettings(false); // Save without sending to device
     }
+    if(learned){ saveSettings(); }
+    refreshSettingsTab('axes');
 }
 
 function processWSReply(event){
@@ -1656,75 +2411,6 @@ function loadCurrentLimits(){
     setPendingFalse();
 }
 
-function onClick(event) {
-    if(!mouseEnabled){ return -1; }
-    if(event.which == 2){
-        var axis = "L0";
-        if(AXIS[axis] && AXIS[axis].altLimits != null){ setLimits(AXIS[axis].altLimits[0], AXIS[axis].altLimits[1], axis); }
-    }
-}
-
-function onScroll(event) {
-    if(!mouseEnabled){ return -1; }
-    if(!scrollWheelEnabled){ return -1; } // Only allow scroll when minKey or initialKey is held
-    var axis = "L0";
-    if(AXIS[axis].limits == null){ loadCurrentLimits(); return -1; }
-    if (event.deltaY >= 0) {
-        if(adjustMin){ AXIS[axis].limits[0] = +AXIS[axis].limits[0] - 250; } else{ AXIS[axis].limits[1] = +AXIS[axis].limits[1] - 250; }
-    }else if (event.deltaY < 0){
-        if(adjustMin){ AXIS[axis].limits[0] = +AXIS[axis].limits[0] + 250; } else{ AXIS[axis].limits[1] = +AXIS[axis].limits[1] + 250; }
-    }
-    if ( AXIS[axis].limits[0] > AXIS[axis].limits[1] ){
-        if(adjustMin){ AXIS[axis].limits[1] = AXIS[axis].limits[0]; } else{ AXIS[axis].limits[0] = AXIS[axis].limits[1]; }
-    }
-    if( AXIS[axis].limits[1] < 0){ AXIS[axis].limits[1] = 0; } else if( AXIS[axis].limits[1] > 9999){ AXIS[axis].limits[1] = 9999; }
-    if( AXIS[axis].limits[0] < 0){ AXIS[axis].limits[0] = 0; } else if( AXIS[axis].limits[0] > 9999){ AXIS[axis].limits[0] = 9999; }
-    setLimits(AXIS[axis].limits[0], AXIS[axis].limits[1], axis);
-}
-
-function keyDown(event){
-    if(pendingKey == null){
-        switch(event.key){
-            case settings.minKey:
-                adjustMin = true;
-                scrollWheelEnabled = true;
-                break;
-            case settings.initialKey:
-                setInitials();
-                scrollWheelEnabled = true;
-                break;
-        }
-    }else{ setKey(event.key); }
-}
-
-function keyUp(event){
-    if(event.key === settings.minKey || event.key === settings.initialKey){
-        adjustMin = false;
-        scrollWheelEnabled = false;
-    }
-}
-
-function hideOverlay(){ try{ document.querySelector('#overlay').hidden = "true"; }catch{ return ""; } }
-
-function createOverlay(text){
-    var video = document.querySelector("#VideoJsPlayer_html5_api");
-    if(video){
-        video = video.parentNode;
-        var overlayElement = document.createElement('div');
-        overlayElement.setAttribute('id', 'overlay');
-        overlayElement.style = "position: absolute;z-index: 999999999999999;left: 50%;transform: translateX(-50%); font-size: 2.5em; color: white; -webkit-text-stroke-width: .75px; -webkit-text-stroke-color: black;";
-        overlayElement.innerHTML = "<h2></h2>";
-        video.appendChild(overlayElement);
-        show(text);
-    }else{ setTimeout(show, 500, text); }
-}
-
-function show(text){
-    var overlay = document.querySelector('#overlay');
-    if(!overlay){ createOverlay(text); }
-    else{ overlay.childNodes[0].innerText = text; overlay.removeAttribute("hidden"); setTimeout(hideOverlay, 1000); }
-}
-
 function limits2socket(axis=""){
     function sendAxis2socket(axis){
         if(AXIS[axis] && AXIS[axis].limits){
@@ -1735,7 +2421,6 @@ function limits2socket(axis=""){
 }
 
 function setLimits(min, max, axis="L0", save=true){
-    show(axis + ": " + min + " - " + max);
     if(!AXIS[axis]){ return -1; }
     if(AXIS[axis].limits == null){ AXIS[axis].limits = new Array(); }
     AXIS[axis].limits[0] = min; AXIS[axis].limits[1] = max;
@@ -1747,40 +2432,36 @@ function setLimits(min, max, axis="L0", save=true){
 }
 
 function init(){
-    // Attach document-level listeners only once. waitForPageChange() calls init() on
-    // every scene navigation; without this guard each visit stacked another capture-phase
-    // keydown/keyup/wheel/auxclick handler, which piled up and could swallow Stash's own
-    // key/tab handling.
-    if(!listenersAttached){
-        document.addEventListener('wheel', onScroll, false);
-        document.addEventListener('auxclick', onClick, false);
-        document.addEventListener('keydown', keyDown, true);
-        document.addEventListener('keyup', keyUp, true);
-        listenersAttached = true;
-    }
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => initAxis(ax));
+    AXIS_LIST.forEach(ax => initAxis(ax));
     loadCurrentLimits();
 }
 
 function getSceneId(){ return parseInt(location.href.split('/scenes/')[1]); }
 
+// Device-side setup for the current scene, once a device is connected. Each scene
+// change supersedes the previous call, so waits don't pile up while disconnected.
+var mainToken = 0;
 function main(){
+    var token = ++mainToken;
+    mainAttempt(token);
+}
+
+function mainAttempt(token){
+    if(token !== mainToken){ return; }
     if(serialConnected){
-        // Restore saved ranges FIRST, synchronously, before anything (centerAxis, the
-        // device D2 reply, or an early onScroll) can call setLimits and trigger a save.
+        // Restore saved ranges FIRST, synchronously, before anything (centerAxis or the
+        // device D2 reply) can call setLimits and trigger a save.
         // Doing this on a timer previously let startup write the fallback [0,9999] over
         // the user's real saved range.
-        ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
+        AXIS_LIST.forEach(ax => {
             if(!AXIS[ax]){ return; }
             if(settings.axes[ax] && settings.axes[ax].limits){
                 // User-saved range wins over device defaults
                 AXIS[ax].limits = settings.axes[ax].limits.slice(0);
-                AXIS[ax].altLimits = settings.axes[ax].limits.slice(0);
                 console.log(`[TCode] Restored saved range for ${ax}: ${AXIS[ax].limits[0]} - ${AXIS[ax].limits[1]}`);
             } else {
                 console.log(`[TCode] No saved range for ${ax}, using fallback: 0 - 9999`);
                 AXIS[ax].limits = [0, 9999];
-                AXIS[ax].altLimits = [0, 9999];
             }
         });
 
@@ -1788,17 +2469,16 @@ function main(){
         limitsReady = true;
 
         loadCurrentLimits(); // ask the device; processLimits() keeps saved ranges over device defaults
-        ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
+        AXIS_LIST.forEach(ax => {
             if(settings.axes[ax] && settings.axes[ax].limits){ limits2socket(ax); } // push saved range to device
         });
 
         // Automatic homing is opt-out; the Home Now button ignores this and always runs.
         if(settings.homeEnabled !== false){
-            ["L0","L1","L2","R0","R1","R2"].forEach(ax => centerAxis(ax));
+            AXIS_LIST.forEach(ax => centerAxis(ax));
         }
         fetchSceneInfo(getSceneId());
-        waitForVideoPlayer();
-    }else{ setTimeout(main, 500); }
+    }else{ setTimeout(function(){ mainAttempt(token); }, 500); }
 }
 
 function cleanUpOptions(list){
@@ -1827,14 +2507,24 @@ function waitForPageChange(){
         AXIS[axis].end = 0;
         AXIS[axis].scriptLoaded = false;
         AXIS[axis].acts = null;
-        // Keep limits and altLimits - these come from the device / saved settings
+        // Keep limits - these come from the device / saved settings
     }
 
     if(location.href.indexOf('/scenes/') != -1){
-        init(); mouseEnabled = true; main();
-    }else{ mouseEnabled = false; videoPlayerLoaded = false; }
+        init(); main();
+        fetchClimaxMarkers();
+    }else{
+        videoPlayerLoaded = false;
+        setClimaxMarkers(null, []);
+    }
     setTimeout(waitForPageChange, 500);
 }
 
+publishDebugApi();
 startNavButton();
+startSerialAutoConnect();
+autoConnectHr();
+startClimaxPolling();
+startPlayerWatch();
+startHud();
 waitForPageChange();
