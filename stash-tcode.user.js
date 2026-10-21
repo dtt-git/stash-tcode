@@ -20,8 +20,6 @@
 var video="";
 var lastPage = null;
 
-var pendingKey = null;
-
 var settings = loadSettings();
 
 // --- SERIAL VARIABLES ---
@@ -39,8 +37,6 @@ var bufferTimeout = null;
 
 var scriptList = null;
 var AXIS = new Object();
-var adjustMin = false; // 0 = Max 1= Min
-var scrollWheelEnabled = false; // Only enabled when minKey or initialKey is held
 var pending = false;
 var msPending = false;
 var lastActionMs = null;          // last playhead position we served, for seek detection
@@ -48,11 +44,9 @@ var SEEK_THRESHOLD_MS = 1000;     // forward jump beyond this is treated as a se
 var boundPlayer = null;           // the <video> our listeners are currently attached to
 var lastSrc = null;               // last media source seen, for transcode offset caching
 var streamOffsetMs = 0;           // scene-time offset of the current stream (transcode)
-var mouseEnabled = true;
 var videoPlayerLoaded = false;
 var saveLimitsTimeout = null; // debounce handle for persisting axis ranges
 var limitsReady = false; // true once saved ranges are restored; gates persistence so startup can't overwrite storage
-var listenersAttached = false; // guards init() so document-level key/wheel listeners attach only once
 const BOTH = 0;
 const LOWER = 1;
 const UPPER = 2;
@@ -124,13 +118,6 @@ function settingsMenuApplySaved(){
                     var homeRow = group ? group.querySelector('.control-row-secondary') : null;
                     if(homeRow){ homeRow.classList.remove('disabled'); }
                 }
-                var randomCheck = document.querySelector('#random' + axis);
-                if(randomCheck){
-                    if(settings.axes[axis].random == ""){ continue; }
-                    randomCheck.checked = true;
-                    var trackedAxis = document.querySelector('#track' + axis);
-                    if(trackedAxis){ trackedAxis.value = settings.axes[axis].random; }
-                }
                 var invertCheck = document.querySelector('#invert' + axis);
                 if(invertCheck && settings.axes[axis].invert){ invertCheck.checked = true; }
                 var autoCenterCheck = document.querySelector('#autoCenter' + axis);
@@ -155,15 +142,6 @@ function saveSettings(saveToDevice=true){
             for (const axis in settings.axes){
                 var axisCheck = document.querySelector('#enable' + axis);
                 if(axisCheck){ settings.axes[axis].enabled = axisCheck.checked; }
-                var randomCheck = document.querySelector('#random' + axis);
-                if(randomCheck){
-                    if(!randomCheck.checked){
-                        settings.axes[axis].random = "";
-                    }else{
-                        var trackedAxis = document.querySelector('#track' + axis);
-                        if(trackedAxis){ settings.axes[axis].random = trackedAxis.value; }
-                    }
-                }
                 var invertCheck = document.querySelector('#invert' + axis);
                 if(invertCheck){ settings.axes[axis].invert = invertCheck.checked; }
                 var autoCenterCheck = document.querySelector('#autoCenter' + axis);
@@ -173,7 +151,6 @@ function saveSettings(saveToDevice=true){
                     settings.axes[axis].center = parseInt(centerInput.value);
                 }
                 // Persist the axis range so it survives refreshes.
-                // (Runs for every axis now, regardless of the Random checkbox state.)
                 if(AXIS[axis] && AXIS[axis].limits != null){
                     settings.axes[axis].limits = [AXIS[axis].limits[0], AXIS[axis].limits[1]];
                 }
@@ -202,24 +179,33 @@ function saveSettings(saveToDevice=true){
 
 function loadSettings(){
     var thisVersion = GM_info.script.version;
-    var defaultSettings = {"debug": false, "device": "", "initialKey": "Shift", "minKey": "Meta", "settingsKey": "F2", "syncKey": "z", "sync": 0,
+    var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true}; };
+    var defaultSettings = {"debug": false, "sync": 0,
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
-                           "axes": { L0: {enabled: true, random: "", invert: false, center: null, autoCenter: true}, L1: {enabled: false, random: "", invert: false, center: null, autoCenter: true}, L2: {enabled: false, random: "", invert: false, center: null, autoCenter: true}, R0: {enabled: false, random: "", invert: false, center: null, autoCenter: true}, R1: {enabled: false, random: "", invert: false, center: null, autoCenter: true}, R2: {enabled: false, random: "", invert: false, center: null, autoCenter: true} },
+                           "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
+                                     R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
                            "currentVersion": thisVersion};
     settings = GM_getValue("settings", defaultSettings);
     handleUpgrade(thisVersion);
-    for(const setting in defaultSettings){
-        if(settings[setting] === undefined){ settings[setting] = defaultSettings[setting]; }
-    }
-    // Backfill per-axis keys added after the user's settings were first written, so
-    // upgrading doesn't leave center/autoCenter undefined on existing installs.
-    for(const ax in defaultSettings.axes){
-        if(!settings.axes[ax]){ settings.axes[ax] = Object.assign({}, defaultSettings.axes[ax]); continue; }
-        for(const k in defaultSettings.axes[ax]){
-            if(settings.axes[ax][k] === undefined){ settings.axes[ax][k] = defaultSettings.axes[ax][k]; }
+    backfillDefaults(settings, defaultSettings);
+    // Drop settings for features that no longer exist (hotkeys, random motion).
+    for(const gone of ["device", "initialKey", "minKey", "settingsKey", "syncKey"]){ delete settings[gone]; }
+    for(const ax in settings.axes){ delete settings.axes[ax].random; }
+    return settings;
+}
+
+// Fill in any key missing from `target`, recursing into nested objects, so settings
+// groups added after a user's settings were first written get their defaults on upgrade.
+// Arrays and null count as values, not groups.
+function backfillDefaults(target, defaults){
+    for(const k in defaults){
+        var d = defaults[k];
+        if(target[k] === undefined){
+            target[k] = (d && typeof d === "object" && !Array.isArray(d)) ? JSON.parse(JSON.stringify(d)) : d;
+        }else if(d && typeof d === "object" && !Array.isArray(d) && target[k] && typeof target[k] === "object"){
+            backfillDefaults(target[k], d);
         }
     }
-    return settings;
 }
 
 // --- TOAST NOTIFICATION SYSTEM ---
@@ -327,23 +313,6 @@ function showToast(title, message, type = 'info', duration = 4000) {
 }
 // ---------------------------------
 
-function setKey(key){
-    settings[pendingKey] = key;
-    var label = document.getElementById(pendingKey).label;
-    document.getElementById(pendingKey).innerHTML = label + " " + settings[pendingKey];
-    pendingKey = null;
-    saveSettings();
-}
-
-function settingsAddButton(parent, id, label, key=""){
-    var button = document.createElement("button");
-    button.setAttribute("id", id);
-    button.innerHTML = label;
-    button.label = label;
-    if(key != ""){ button.innerHTML += " " + key; }
-    parent.appendChild(button);
-}
-
 function settingsAddCheckBox(parent, id, label){
     var line = document.createElement("div");
     line.className = "checkbox-line";
@@ -447,20 +416,6 @@ function settingsAddGroupedControls(parent, checkboxId, axis, minId, maxId, slid
     const label = document.createElement('label'); label.setAttribute('for', checkboxId); label.textContent = axis;
     checkboxWrapper.appendChild(label); rowTop.appendChild(checkboxWrapper);
 
-    const randomWrapper = document.createElement('div'); randomWrapper.classList.add('random-wrapper');
-    const randomCheckbox = document.createElement('input'); randomCheckbox.type = 'checkbox'; randomCheckbox.id = `random${axis}`;
-    randomWrapper.appendChild(randomCheckbox);
-    const randomLabel = document.createElement('label'); randomLabel.setAttribute('for', `random${axis}`); randomLabel.textContent = 'Random';
-    randomWrapper.appendChild(randomLabel);
-
-    const trackDropdown = document.createElement('select'); trackDropdown.id = `track${axis}`;
-    allSliderIds.forEach(id => {
-        if (id !== minId) {
-            const option = document.createElement('option'); option.value = id; option.textContent = id; trackDropdown.appendChild(option);
-        }
-    });
-    randomWrapper.appendChild(trackDropdown); rowTop.appendChild(randomWrapper);
-
     const invertWrapper = document.createElement('div'); invertWrapper.classList.add('invert-wrapper');
     const invertCheckbox = document.createElement('input'); invertCheckbox.type = 'checkbox'; invertCheckbox.id = `invert${axis}`;
     invertWrapper.appendChild(invertCheckbox);
@@ -527,30 +482,19 @@ function settingsAddGroupedControls(parent, checkboxId, axis, minId, maxId, slid
         settings.axes[axis].enabled = event.target.checked;
         if (event.target.checked) {
             dualSliderContainer.classList.remove('disabled');
-            randomWrapper.style.opacity = '1';
             invertWrapper.style.opacity = '1';
             rowBottom.classList.remove('disabled');
         } else {
             dualSliderContainer.classList.add('disabled');
-            randomWrapper.style.opacity = '0.5';
             invertWrapper.style.opacity = '0.5';
             rowBottom.classList.add('disabled');
         }
     });
-    randomCheckbox.addEventListener('change', (event) => { settings.axes[axis].random = event.target.value; });
     invertCheckbox.addEventListener('change', (event) => { settings.axes[axis].invert = event.target.checked; });
-    toolTip(randomCheckbox, "Generates random motion, based on selected axis");
     if (!checkbox.checked) {
         dualSliderContainer.classList.add('disabled');
-        randomWrapper.style.opacity = '0.5';
         invertWrapper.style.opacity = '0.5';
         rowBottom.classList.add('disabled');
-    }
-}
-
-function menuListeners(keys){
-    for(var key of keys){
-        document.getElementById(key).addEventListener("click", function(){ this.innerHTML = "Press a key..."; pendingKey = this.id; }, false);
     }
 }
 
@@ -581,7 +525,6 @@ function dualSliderListeners(minId, maxId) {
 let activeTab = 'device';
 function settingsAddTabContent(parentDiv, type, id, label, key = "") {
     switch (type) {
-        case 'button': settingsAddButton(parentDiv, id, label, key); break;
         case 'checkbox': settingsAddCheckBox(parentDiv, id, label); break;
         case 'input': settingsAddInput(parentDiv, id, label); break;
     }
@@ -685,7 +628,6 @@ function startNavButton(){
 // saveSettings throws — otherwise a save error would leave the invisible overlay on top of
 // the page, swallowing every click (this was the "scene tabs stop responding" bug).
 function closeSettings(){
-    pendingKey = null; // clear any half-started hotkey rebind so it can't swallow later keystrokes
     try { saveSettings(); } catch(e){ debug("[TCode] saveSettings error on close: " + e); }
     var overlayEl = document.getElementById("settings-overlay");
     if(overlayEl){ overlayEl.remove(); }
@@ -930,9 +872,9 @@ function toggleMenu() {
     div.appendChild(tabContentContainer);
 
     // Create tabs
-    const tabs = ['device', 'keys', 'axes', 'advanced'];
+    const tabs = ['device', 'axes', 'advanced'];
     const tabContents = {};
-    const tabIcons = { device: '🔌', keys: '⌨️', axes: '🎚️', advanced: '🔧' };
+    const tabIcons = { device: '🔌', axes: '🎚️', advanced: '🔧' };
     tabs.forEach(t => {
         const btn = document.createElement('button');
         btn.id = t + 'Tab';
@@ -972,12 +914,6 @@ function toggleMenu() {
     deviceContentDiv.appendChild(centerNowBtn);
     toolTip(centerNowBtn, "Move every enabled axis to its home position now.");
 
-    // Keys tab content
-    const keysContentDiv = tabContents['keys'];
-    settingsAddTabContent(keysContentDiv, "button", "initialKey", "Set Initial Ranges: ", settings.initialKey);
-    keysContentDiv.appendChild(document.createElement("br"));
-    settingsAddTabContent(keysContentDiv, "button", "minKey", "Set Minimum: ", settings.minKey);
-
     // Axes tab content
     const axesContentDiv = tabContents['axes'];
     ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
@@ -1005,7 +941,6 @@ function toggleMenu() {
     }, false);
 
     document.getElementById("settings").addEventListener("change", function(){ saveSettings(false); }, false);
-    menuListeners(["initialKey", "minKey"]);
     // Set each slider to the saved/live range before wiring listeners.
     // (settingsMenuApplySaved restores checkboxes/dropdowns but never the range sliders,
     //  so without this the handles show 0-9999 even when a range is stored.)
@@ -1171,7 +1106,7 @@ function initAxis(name){
     if(AXIS[name]){ return -1; }
     AXIS[name] = new Object();
     AXIS[name].index = 0; AXIS[name].start = 0; AXIS[name].end = 0; AXIS[name].scriptLoaded = false;
-    AXIS[name].acts = null; AXIS[name].limits = null; AXIS[name].altLimits = null;
+    AXIS[name].acts = null; AXIS[name].limits = null;
 }
 
 function fetchAllFunscripts(){
@@ -1286,17 +1221,9 @@ function fetchMainFunscript() {
                         debug("Successfully loaded multi-axis funscript with axes: " + multiAxisResult.join(", "));
                         showToast("Multi-Axis Script Loaded", "Parsed " + multiAxisResult.length + " axes: " + multiAxisResult.join(", "), "success");
 
-                        // For any axes not found in the multi-axis file, try fetching separate files or use random
+                        // For any axes not found in the multi-axis file, try their separate files
                         for (var axis in AXIS) {
-                            if (!AXIS[axis].scriptLoaded) {
-                                if (settings.axes[axis].random != "") {
-                                    generateRandomMotion(axis, settings.axes[axis].random);
-                                    AXIS[axis].scriptLoaded = true;
-                                } else {
-                                    // Try fetching individual axis file
-                                    fetchFunscript(axis, true);
-                                }
-                            }
+                            if (!AXIS[axis].scriptLoaded) { fetchFunscript(axis, true); }
                         }
                     } else {
                         // Single-axis file (legacy format) - load as L0
@@ -1312,18 +1239,7 @@ function fetchMainFunscript() {
 
                         // Fetch other axes from separate files
                         for (var axis in AXIS) {
-                            if (!AXIS[axis].scriptLoaded) {
-                                if (settings.axes[axis].random != "") {
-                                    if (!AXIS[settings.axes[axis].random].scriptLoaded) {
-                                        fetchFunscript(axis);
-                                    } else {
-                                        generateRandomMotion(axis, settings.axes[axis].random);
-                                        AXIS[axis].scriptLoaded = true;
-                                    }
-                                } else if (axis !== "L0") {
-                                    fetchFunscript(axis);
-                                }
-                            }
+                            if (!AXIS[axis].scriptLoaded && axis !== "L0") { fetchFunscript(axis); }
                         }
                     }
                 } catch (error) {
@@ -1347,40 +1263,10 @@ function fetchMainFunscript() {
 // Fallback: fetch individual axis files
 function fetchIndividualAxisFiles() {
     for (var axis in AXIS) {
-        if (settings.axes[axis].random != "") {
-            if (!AXIS[settings.axes[axis].random].scriptLoaded) {
-                fetchFunscript(axis);
-            }
-        }
-        if (!AXIS[axis].scriptLoaded) {
-            fetchFunscript(axis);
-        }
+        if (!AXIS[axis].scriptLoaded) { fetchFunscript(axis); }
     }
     var chosenScript = document.querySelector('#stash-interactive-tools-select-funscripts');
     if (chosenScript) { cleanUpOptions(chosenScript); }
-}
-
-function generateRandomMotion(axis, relatedAxis=""){
-    if(AXIS[axis].acts != null){ return -1; }
-    var interval = -1;
-    var modifier = Math.random() * (1500 - 250) + 250;
-    if(Math.random() < 0.5){ modifier * -1; }
-    if(AXIS[relatedAxis]){
-        if(AXIS[relatedAxis].acts == null && generateRandomMotion.caller != ""){
-            setTimeout(function(){ generateRandomMotion(axis, relatedAxis) }, 500);
-            return -1;
-        }
-        AXIS[axis].acts = new Array();
-        for(var i=AXIS[relatedAxis].index;i<AXIS[relatedAxis].acts.length;i++){
-            AXIS[axis].acts[i] = new Object();
-            interval = Math.round(AXIS[relatedAxis].acts[i].at + modifier);
-            if(interval < 0){ interval = 0; }
-            AXIS[axis].acts[i].at = interval;
-            AXIS[axis].acts[i].pos = AXIS[relatedAxis].acts[i].pos;
-        }
-        AXIS[axis].start = AXIS[axis].acts[0].at;
-        AXIS[axis].end = AXIS[axis].acts[AXIS[axis].acts.length-1].at;
-    }
 }
 
 function fetchFunscript(axis, force=false){
@@ -1423,11 +1309,7 @@ function fetchFunscript(axis, force=false){
                     AXIS[axis].end = AXIS[axis].acts[AXIS[axis].acts.length-1].at;
                     showToast("Axis Loaded", axis + " with " + AXIS[axis].acts.length + " actions", "success", 3000);
                 }else{
-                    if(settings.axes[axis].random != ""){
-                        generateRandomMotion(axis, settings.axes[axis].random);
-                        showToast("Random Generated", axis + " (based on " + settings.axes[axis].random + ")", "info", 3000);
-                    }
-                    else{ AXIS[axis].acts = null; }
+                    AXIS[axis].acts = null;
                 }
                 AXIS[axis].scriptLoaded = true;
             }
@@ -1632,10 +1514,6 @@ function waitForVideoPlayer(){
     setTimeout(waitForVideoPlayer, 10);
 }
 
-function setInitials(axis="L0"){
-    if(AXIS[axis] && AXIS[axis].limits != null){ AXIS[axis].altLimits = AXIS[axis].limits.slice(0); }
-}
-
 function processLimits(data){
     var values;
     var axesFound = [];
@@ -1651,7 +1529,6 @@ function processLimits(data){
                 console.log(`[TCode] Keeping saved limits for ${values[0]} (ignoring device values ${values[1]} - ${values[2]})`);
             }else{
                 AXIS[values[0]].limits = new Array(values[1], values[2]);
-                AXIS[values[0]].altLimits = new Array(values[1], values[2]);
                 console.log(`[TCode] Set ${values[0]} limits: ${values[1]} - ${values[2]}`);
             }
 
@@ -1722,54 +1599,6 @@ function loadCurrentLimits(){
     setPendingFalse();
 }
 
-function onClick(event) {
-    if(!mouseEnabled){ return -1; }
-    if(event.which == 2){
-        var axis = "L0";
-        if(AXIS[axis] && AXIS[axis].altLimits != null){ setLimits(AXIS[axis].altLimits[0], AXIS[axis].altLimits[1], axis); }
-    }
-}
-
-function onScroll(event) {
-    if(!mouseEnabled){ return -1; }
-    if(!scrollWheelEnabled){ return -1; } // Only allow scroll when minKey or initialKey is held
-    var axis = "L0";
-    if(AXIS[axis].limits == null){ loadCurrentLimits(); return -1; }
-    if (event.deltaY >= 0) {
-        if(adjustMin){ AXIS[axis].limits[0] = +AXIS[axis].limits[0] - 250; } else{ AXIS[axis].limits[1] = +AXIS[axis].limits[1] - 250; }
-    }else if (event.deltaY < 0){
-        if(adjustMin){ AXIS[axis].limits[0] = +AXIS[axis].limits[0] + 250; } else{ AXIS[axis].limits[1] = +AXIS[axis].limits[1] + 250; }
-    }
-    if ( AXIS[axis].limits[0] > AXIS[axis].limits[1] ){
-        if(adjustMin){ AXIS[axis].limits[1] = AXIS[axis].limits[0]; } else{ AXIS[axis].limits[0] = AXIS[axis].limits[1]; }
-    }
-    if( AXIS[axis].limits[1] < 0){ AXIS[axis].limits[1] = 0; } else if( AXIS[axis].limits[1] > 9999){ AXIS[axis].limits[1] = 9999; }
-    if( AXIS[axis].limits[0] < 0){ AXIS[axis].limits[0] = 0; } else if( AXIS[axis].limits[0] > 9999){ AXIS[axis].limits[0] = 9999; }
-    setLimits(AXIS[axis].limits[0], AXIS[axis].limits[1], axis);
-}
-
-function keyDown(event){
-    if(pendingKey == null){
-        switch(event.key){
-            case settings.minKey:
-                adjustMin = true;
-                scrollWheelEnabled = true;
-                break;
-            case settings.initialKey:
-                setInitials();
-                scrollWheelEnabled = true;
-                break;
-        }
-    }else{ setKey(event.key); }
-}
-
-function keyUp(event){
-    if(event.key === settings.minKey || event.key === settings.initialKey){
-        adjustMin = false;
-        scrollWheelEnabled = false;
-    }
-}
-
 function hideOverlay(){ try{ document.querySelector('#overlay').hidden = "true"; }catch{ return ""; } }
 
 function createOverlay(text){
@@ -1813,17 +1642,6 @@ function setLimits(min, max, axis="L0", save=true){
 }
 
 function init(){
-    // Attach document-level listeners only once. waitForPageChange() calls init() on
-    // every scene navigation; without this guard each visit stacked another capture-phase
-    // keydown/keyup/wheel/auxclick handler, which piled up and could swallow Stash's own
-    // key/tab handling.
-    if(!listenersAttached){
-        document.addEventListener('wheel', onScroll, false);
-        document.addEventListener('auxclick', onClick, false);
-        document.addEventListener('keydown', keyDown, true);
-        document.addEventListener('keyup', keyUp, true);
-        listenersAttached = true;
-    }
     ["L0","L1","L2","R0","R1","R2"].forEach(ax => initAxis(ax));
     loadCurrentLimits();
 }
@@ -1832,8 +1650,8 @@ function getSceneId(){ return parseInt(location.href.split('/scenes/')[1]); }
 
 function main(){
     if(serialConnected){
-        // Restore saved ranges FIRST, synchronously, before anything (centerAxis, the
-        // device D2 reply, or an early onScroll) can call setLimits and trigger a save.
+        // Restore saved ranges FIRST, synchronously, before anything (centerAxis or the
+        // device D2 reply) can call setLimits and trigger a save.
         // Doing this on a timer previously let startup write the fallback [0,9999] over
         // the user's real saved range.
         ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
@@ -1841,12 +1659,10 @@ function main(){
             if(settings.axes[ax] && settings.axes[ax].limits){
                 // User-saved range wins over device defaults
                 AXIS[ax].limits = settings.axes[ax].limits.slice(0);
-                AXIS[ax].altLimits = settings.axes[ax].limits.slice(0);
                 console.log(`[TCode] Restored saved range for ${ax}: ${AXIS[ax].limits[0]} - ${AXIS[ax].limits[1]}`);
             } else {
                 console.log(`[TCode] No saved range for ${ax}, using fallback: 0 - 9999`);
                 AXIS[ax].limits = [0, 9999];
-                AXIS[ax].altLimits = [0, 9999];
             }
         });
 
@@ -1893,12 +1709,12 @@ function waitForPageChange(){
         AXIS[axis].end = 0;
         AXIS[axis].scriptLoaded = false;
         AXIS[axis].acts = null;
-        // Keep limits and altLimits - these come from the device / saved settings
+        // Keep limits - these come from the device / saved settings
     }
 
     if(location.href.indexOf('/scenes/') != -1){
-        init(); mouseEnabled = true; main();
-    }else{ mouseEnabled = false; videoPlayerLoaded = false; }
+        init(); main();
+    }else{ videoPlayerLoaded = false; }
     setTimeout(waitForPageChange, 500);
 }
 
