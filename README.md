@@ -15,8 +15,9 @@ Maintained by **dtt**. Originally based on Stash-TCode by Steel, with modificati
 - Handles single-axis and multi-axis funscripts, plus separate per-axis files
   (`.surge`, `.sway`, `.twist`, `.roll`, `.pitch`).
 - Per-axis range, invert and home position, all saved across refreshes.
-- Optional speed limit in u/s (1 u/s = the device's full travel in one second). Moves that would
-  be faster are shortened rather than slowed, so playback stays in sync.
+- Optional speed limit in TCode units per second (positions run 0-9999, so 9,999 u/s is the full
+  travel in one second). Moves that would be faster are shortened rather than slowed, so playback
+  stays in sync.
 - Auto motion: any axis the scene has no script for can follow a smooth sine wave at its own
   frequency, so a video without a funscript still gets motion.
 - Settings live in a dialog built from Stash's own components, so it matches Stash and any custom theme.
