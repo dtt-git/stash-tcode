@@ -111,7 +111,7 @@ function saveSettings(){
 
 function loadSettings(){
     var thisVersion = GM_info.script.version;
-    var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true}; };
+    var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5}; };
     var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true,
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
@@ -641,6 +641,13 @@ function buildAxisGroup(card, axis){
             function(lo, hi){ applyRange(lo, hi, true); }).el, {sub: true});
     uiSetting(group, "Invert", "Flip the direction of this axis.",
         uiSwitch('invert' + axis, cfg.invert, function(v){ cfg.invert = v; saveSettings(); }), {sub: true});
+    var freqRow;
+    uiSetting(group, "Auto motion", "When the scene has no script for this axis, move in a smooth sine wave instead.",
+        uiSwitch('auto' + axis, cfg.auto, function(v){ cfg.auto = v; freqRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
+    var hzFormat = function(v){ return v.toFixed(2) + " Hz · " + Math.round(v * 60) + "/min"; };
+    freqRow = uiSetting(group, "Frequency", "Full cycles per second.",
+        uiRange('autoHz' + axis, cfg.autoHz, {min: AUTO_HZ_MIN, max: AUTO_HZ_MAX, step: 0.05, format: hzFormat}, null,
+                function(v){ cfg.autoHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.auto});
     uiSetting(group, "Auto home", "Rest at the middle of the range. Turn off to choose the home position.",
         uiSwitch('autoCenter' + axis, cfg.autoCenter !== false, function(v){
             cfg.autoCenter = v;
@@ -1914,6 +1921,43 @@ function updateGovUi(){
 
 // ---------------------------------
 
+// --- AUTO MOTION ---
+// An axis with auto motion on, and no script for the current scene, follows a sine wave
+// across its range at its own frequency. A new target goes out every SINE_STEP_MS and
+// the device interpolates between them, so the motion is smooth rather than a zigzag.
+// It runs on video time, so it pauses with the video, and goes through the same
+// invert / heart-rate shaping as scripted motion.
+
+var SINE_STEP_MS = 50;
+var SINE_REJOIN_MS = 500;   // first move after a seek or start: slow, never a slam
+var AUTO_HZ_MIN = 0.05;
+var AUTO_HZ_MAX = 3;
+
+// Sine position (0-100) at sceneMs. Each axis starts at a different point in its
+// cycle so axes sharing a frequency don't move in lockstep.
+function sinePosition(hz, sceneMs, axisIndex){
+    hz = Math.max(AUTO_HZ_MIN, Math.min(AUTO_HZ_MAX, Number(hz) || 0.5));
+    return 50 + 50 * Math.sin(2 * Math.PI * hz * sceneMs / 1000 + axisIndex * 0.7);
+}
+
+function autoMotion(axis, ms, jumped, a){
+    var ax = AXIS[axis];
+    // Moves chain end to end: the next one goes out when the device reaches the last
+    // target (ax.sineDue), so a slow rejoin move is never cut short by a quick step.
+    // A seek, or the playhead landing far from the chain, starts over with a rejoin.
+    var fresh = jumped || ax.sineDue == null || ms < ax.sineDue - SINE_REJOIN_MS || ms > ax.sineDue + SINE_REJOIN_MS;
+    if(!fresh && ms < ax.sineDue){ return; }
+    var interval = fresh ? SINE_REJOIN_MS : SINE_STEP_MS;
+    ax.sineDue = ms + interval;
+    var pos = sinePosition(settings.axes[axis].autoHz, ms + interval, AXIS_LIST.indexOf(axis));
+    if(settings.axes[axis].invert){ pos = 100 - pos; }
+    pos = shapePosition(axis, pos, a);
+    var lo = parseInt(ax.limits[0]), hi = parseInt(ax.limits[1]);
+    queueMove(axis, Math.round((pos / 100) * (hi - lo) + lo), interval);
+}
+
+// ---------------------------------
+
 function listAxes(exclude=""){
     var keys = Object.keys(AXIS);
     let removeAxis = keys.indexOf(exclude);
@@ -2007,7 +2051,12 @@ function currentAction(ms){
         lastActionMs = ms;
         var gov = lastGov = computeAllowance(Date.now(), ms);
         for(var x in AXIS){
-            if(!settings.axes[x].enabled || AXIS[x].acts == null || AXIS[x].limits == null){ continue; }
+            if(!settings.axes[x].enabled || AXIS[x].limits == null){ continue; }
+            if(AXIS[x].acts == null){
+                // No script for this axis in this scene: auto motion fills in, if it's on.
+                if(settings.axes[x].auto){ autoMotion(x, ms, jumped, gov.a); }
+                continue;
+            }
             if(jumped){ AXIS[x].index = seekIndex(AXIS[x].acts, ms); }
             // Re-seat rather than give up when the index has run off the end (video
             // ended, or a seek left it stranded). The old guard skipped the whole

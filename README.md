@@ -15,6 +15,8 @@ Maintained by **dtt**. Originally based on Stash-TCode by Steel, with modificati
 - Handles single-axis and multi-axis funscripts, plus separate per-axis files
   (`.surge`, `.sway`, `.twist`, `.roll`, `.pitch`).
 - Per-axis range, invert and home position, all saved across refreshes.
+- Auto motion: any axis the scene has no script for can follow a smooth sine wave at its own
+  frequency, so a video without a funscript still gets motion.
 - Settings live in a dialog built from Stash's own components, so it matches Stash and any custom theme.
 - Heart-rate modulation, adaptive ceiling decay and climax markers (below).
 - A stats overlay on the video: heart rate, ceiling, edges and what the limiter is doing.
@@ -110,7 +112,7 @@ Turn on **Advanced → Debug mode** to get:
 ### Tests
 
 The heart-rate governor's math (approach band, edge hysteresis, decay, rejoin ramp, climax window,
-watchdog and axis shaping) is covered by plain Node tests:
+watchdog and axis shaping) and the auto-motion sine are covered by plain Node tests:
 
 ```
 node tests/governor.test.js
