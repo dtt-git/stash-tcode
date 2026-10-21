@@ -32,8 +32,10 @@ Maintained by **dtt**. Originally based on Stash-TCode by Steel, with modificati
 
 <p>
   <img src="docs/screenshots/settings-heart-rate.png" alt="The Heart Rate tab of the settings dialog" width="49%">
-  <img src="docs/screenshots/settings-axes.png" alt="The Axes tab of the settings dialog" width="49%">
+  <img src="docs/screenshots/settings-axes.png" alt="The Axes tab: twist set to follow stroke, with range, invert, auto motion, speed limit and home settings" width="49%">
 </p>
+
+Left, the Heart Rate tab. Right, the Axes tab with twist set to follow stroke.
 
 The stats overlay on the video, two edges in: the ceiling has decayed from 120 to 118 BPM and strokes
 are easing off at 72%. The navbar button shows the device status and live heart rate.
