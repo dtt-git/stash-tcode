@@ -116,7 +116,10 @@ function loadSettings(){
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
-                           "hr": { deviceId: null, deviceName: null },
+                           "hr": { deviceId: null, deviceName: null, enabled: false,
+                                   restingHr: 70, climaxHr: 140, band: 10, floor: 30, rejoinSec: 8, timeoutSec: 8,
+                                   decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105,
+                                   climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15 },
                            "currentVersion": thisVersion};
     settings = GM_getValue("settings", defaultSettings);
     handleUpgrade(thisVersion);
@@ -279,7 +282,7 @@ function uiButton(label, variant, onClick, opts){
 
 // Number box. Out-of-range or empty input snaps back to the nearest valid value on change.
 function uiNumber(id, value, o, onChange){
-    var input = el('input', {type: 'number', id: 'tcode-' + id, class: 'form-control form-control-sm tcode-number',
+    var input = el('input', {type: 'number', id: 'tcode-' + id, class: 'input-control form-control form-control-sm tcode-number',
                              min: o.min, max: o.max, step: o.step || 1, value: value});
     input.addEventListener('change', function(){
         var v = parseFloat(input.value);
@@ -676,6 +679,64 @@ function buildAdvancedTab(body){
     }
 }
 
+// ---- Heart Rate tab ----
+SETTINGS_TABS.splice(2, 0, { id: 'hr', label: 'Heart Rate', build: buildHrTab });
+
+function buildHrTab(body){
+    var cfg = settings.hr;
+    var bpm = function(v){ return v + " BPM"; };
+    var sec = function(v){ return v + " s"; };
+    var changed = function(){ saveSettings(); refreshGovernor(); };
+
+    var main = uiSection(body, "Heart-rate modulation",
+        "Shortens strokes as your heart rate nears your climax rate, and holds the stroker at the edge until you recover.");
+    uiSetting(main, "Enable", hr.status === 'off' ? "Connect a monitor on the Device tab. Without one, scripts play normally." : null,
+        uiSwitch('hrEnabled', cfg.enabled, function(v){ cfg.enabled = v; changed(); }));
+    var live = uiSetting(main, "Session", null,
+        uiButton("Reset", "secondary", function(){ resetHrSession(); }, {small: true}));
+    live.firstChild.appendChild(el('div', {class: 'sub-heading', id: 'tcode-gov-status', text: govStatusText(lastGov)}));
+
+    var rates = uiSection(body, "Heart rates");
+    var restInput, climaxInput;
+    restInput = uiNumber('restingHr', cfg.restingHr, {min: 30, max: 120, suffix: "BPM"}, function(v){
+        cfg.restingHr = v;
+        if(cfg.climaxHr < v + MIN_CEILING_GAP){ cfg.climaxHr = v + MIN_CEILING_GAP; climaxInput.querySelector('input').value = cfg.climaxHr; }
+        changed();
+    });
+    climaxInput = uiNumber('climaxHr', cfg.climaxHr, {min: 50, max: 250, suffix: "BPM"}, function(v){
+        cfg.climaxHr = Math.max(v, cfg.restingHr + MIN_CEILING_GAP);
+        climaxInput.querySelector('input').value = cfg.climaxHr;
+        changed();
+    });
+    uiSetting(rates, "Resting", "Your heart rate when relaxed.", restInput);
+    uiSetting(rates, "Climax", "The heart rate where you'd climax. This is the ceiling: strokes stop here. At least " + MIN_CEILING_GAP + " BPM above resting.", climaxInput);
+
+    var resp = uiSection(body, "Response");
+    uiSetting(resp, "Approach band", "Strokes start shortening this many BPM below the ceiling. 0 only reacts at the ceiling.",
+        uiRange('hrBand', cfg.band, {min: 0, max: 40, format: bpm}, null, function(v){ cfg.band = v; changed(); }).el);
+    uiSetting(resp, "Shortest stroke", "Stroke length just below the ceiling, as a share of the full range.",
+        uiRange('hrFloor', cfg.floor, {min: 0, max: 100, format: function(v){ return v + "%"; }}, null, function(v){ cfg.floor = v; changed(); }).el);
+    uiSetting(resp, "Rejoin time", "After an edge, strokes ramp back to full over this long.",
+        uiRange('hrRejoin', cfg.rejoinSec, {min: 0, max: 60, format: sec}, null, function(v){ cfg.rejoinSec = v; changed(); }).el);
+    uiSetting(resp, "Signal timeout", "If the monitor sends nothing for this long, the device stops.",
+        uiRange('hrTimeout', cfg.timeoutSec, {min: 3, max: 20, format: sec}, null, function(v){ cfg.timeoutSec = v; changed(); }).el);
+
+    var decay = uiSection(body, "Adaptive ceiling decay", "Lowers the ceiling as edges add up, to counter fatigue over a long session.");
+    var decayRows = [];
+    uiSetting(decay, "Enable", null, uiSwitch('hrDecay', cfg.decay, function(v){
+        cfg.decay = v;
+        decayRows.forEach(function(r){ r.classList.toggle('disabled', !v); });
+        changed();
+    }));
+    decayRows.push(uiSetting(decay, "Every", "Number of edges per step.",
+        uiNumber('decayEvery', cfg.decayEvery, {min: 1, max: 10, suffix: "edges"}, function(v){ cfg.decayEvery = v; changed(); }), {sub: true}));
+    decayRows.push(uiSetting(decay, "Drop by", "How much the ceiling falls each step.",
+        uiNumber('decayBpm', cfg.decayBpm, {min: 1, max: 5, suffix: "BPM"}, function(v){ cfg.decayBpm = v; changed(); }), {sub: true}));
+    decayRows.push(uiSetting(decay, "Floor", "The ceiling never decays below this (or below resting + " + MIN_CEILING_GAP + ").",
+        uiNumber('decayFloor', cfg.decayFloor, {min: 80, max: 130, suffix: "BPM"}, function(v){ cfg.decayFloor = v; changed(); }), {sub: true}));
+    decayRows.forEach(function(r){ r.classList.toggle('disabled', !cfg.decay); });
+}
+
 // --- WEB SERIAL IMPLEMENTATION ---
 
 // Ask the user to pick a port (needs a click), then open it.
@@ -856,6 +917,7 @@ function feedHr(bpm, contact){
     hr.at = Date.now();
     hr.contact = contact;
     updateHrUi();
+    refreshGovernor();
 }
 
 function hrLive(){ return hr.status === 'live' && hr.bpm != null; }
@@ -1012,6 +1074,7 @@ function stopHrSim(){
 function setHrStatus(status){
     hr.status = status;
     updateHrUi();
+    refreshGovernor();
     refreshSettingsTab('device');
 }
 
@@ -1094,6 +1157,8 @@ function publishDebugApi(){
         setHr: function(bpm){ if(bpm == null){ stopHrSim(); } else { startHrSim(bpm); } },
         hr: function(){ return { bpm: hr.bpm, at: hr.at, ageMs: hr.at ? Date.now() - hr.at : null, contact: hr.contact,
                                  status: hr.status, source: hr.source, battery: hr.battery }; },
+        governor: function(){ return { last: lastGov, session: Object.assign({}, hrSession), marks: climaxMarksMs.slice() }; },
+        resetSession: resetHrSession,
         state: function(){
             var axes = {};
             for(var ax in AXIS){
@@ -1343,6 +1408,196 @@ function fetchFunscript(axis, force=false){
     }
 }
 
+// --- HR GOVERNOR ---
+// Heart rate decides how much of each stroke the device may play: the allowance `a`,
+// 0-1. Inspired by EdgeLoop's biofeedback limiter (github.com/marshallmims/edgeloop),
+// reimplemented here:
+//   - Approach band: in the last `band` BPM below the ceiling, `a` falls linearly from
+//     1 to the floor, so strokes shorten as you climb.
+//   - Edge: at the ceiling `a` is 0 (the stroker parks at the bottom of its range) until
+//     HR drops EDGE_RELEASE_BPM below it, then ramps back in over `rejoinSec`.
+//   - Adaptive decay: every N edges the ceiling drops M BPM, never below a floor.
+//   - Climax marks: around a marked time `a` is lifted toward 1 regardless of HR.
+//   - Watchdog: with modulation on and no fresh reading, `a` is 0.
+// The pure functions below take everything as arguments so they can be tested alone.
+
+var EDGE_RELEASE_BPM = 5;   // hysteresis: an edge only clears this far below the ceiling
+var MIN_CEILING_GAP = 15;   // the ceiling never decays to within this of resting HR
+var REJOIN_START = 0.16;    // allowance at the moment an edge clears
+
+var hrSession = { edged: false, edges: 0, releasedAt: null };
+var climaxMarksMs = [];     // climax mark times for the current scene (scene ms)
+var lastGov = null;         // most recent governor result, for the UI
+
+// The ceiling after adaptive decay. The floor can stop the decay but never raise the
+// ceiling above the typed climax HR. Returns {ceiling, decay}.
+function workingCeiling(cfg, edges){
+    var typed = cfg.climaxHr;
+    if(!cfg.decay || !(edges > 0)){ return { ceiling: typed, decay: 0 }; }
+    var lowest = Math.min(typed, cfg.restingHr + MIN_CEILING_GAP);
+    var drop = Math.floor(edges / Math.max(1, cfg.decayEvery)) * cfg.decayBpm;
+    var floor = Math.max(lowest, cfg.decayFloor);
+    var ceiling = Math.min(typed, Math.max(floor, typed - drop));
+    return { ceiling: ceiling, decay: typed - ceiling };
+}
+
+// 1 below the band, falling linearly to floorPct/100 at the ceiling.
+function approachFactor(bpm, ceiling, band, floorPct){
+    if(!(band > 0)){ return 1; }
+    var s = Math.max(0, Math.min(1, (bpm - (ceiling - band)) / band));
+    return 1 - s * (1 - floorPct / 100);
+}
+
+// Cap on the allowance `sinceSec` seconds after an edge cleared: eases from REJOIN_START
+// up to 1 over rejoinSec. No ramp running (null) or a zero-length ramp is 1.
+function rejoinFactor(sinceSec, rejoinSec){
+    if(sinceSec == null || !(rejoinSec > 0)){ return 1; }
+    var t = Math.max(0, Math.min(1, sinceSec / rejoinSec));
+    var eased = t * t * (3 - 2 * t); // smoothstep
+    return REJOIN_START + (1 - REJOIN_START) * eased;
+}
+
+// How far climax marks have taken over at sceneMs, 0-1: climbs over rampMs before a
+// mark, holds at 1 for holdMs, then eases back over easeMs. The strongest mark wins.
+function climaxFactor(sceneMs, marks, rampMs, holdMs, easeMs){
+    if(sceneMs == null || !marks || !marks.length){ return 0; }
+    var k = 0;
+    for(var mark of marks){
+        var d = mark - sceneMs; // > 0: mark still ahead
+        if(d > 0){
+            if(rampMs > 0 && d <= rampMs){ k = Math.max(k, 1 - d / rampMs); }
+        }else if(-d <= holdMs){
+            k = 1;
+        }else if(easeMs > 0 && -d <= holdMs + easeMs){
+            k = Math.max(k, 1 - (-d - holdMs) / easeMs);
+        }
+    }
+    return Math.max(0, Math.min(1, k));
+}
+
+// Advance the edge state machine for one reading. Rising through the ceiling counts an
+// edge (but not while a climax mark has taken over); it clears below the release band.
+function updateEdgeState(session, bpm, ceiling, climaxActive, now){
+    if(bpm >= ceiling){
+        if(!session.edged && !climaxActive){
+            session.edged = true;
+            session.edges++;
+            return 'edge';
+        }
+    }else if(session.edged && bpm < ceiling - EDGE_RELEASE_BPM){
+        session.edged = false;
+        session.releasedAt = now;
+        return 'release';
+    }
+    return null;
+}
+
+// The governor for this moment. Returns {a, phase, label, ceiling, decay, climax, bpm}.
+//   phase: OFF | NO MONITOR | NO SIGNAL | FREE | EASING | EDGE | REJOINING | CLIMAX
+function computeAllowance(now, sceneMs){
+    var cfg = settings.hr;
+    var res = { a: 1, phase: 'OFF', label: 'OFF', ceiling: null, decay: 0, climax: 0, bpm: hr.bpm };
+    if(!cfg.enabled){ return res; }
+    var wc = workingCeiling(cfg, hrSession.edges);
+    res.ceiling = wc.ceiling;
+    res.decay = wc.decay;
+    res.climax = climaxFactor(sceneMs, climaxMarksMs, cfg.climaxRampSec * 1000, cfg.climaxHoldSec * 1000, cfg.climaxEaseSec * 1000);
+
+    if(hr.status === 'off'){
+        // No monitor at all: play the script as-is rather than refuse to move.
+        res.phase = res.label = 'NO MONITOR';
+        return res;
+    }
+    if(hr.bpm == null || now - hr.at > cfg.timeoutSec * 1000){
+        // Watchdog: a monitor that has gone quiet stops the device.
+        res.a = 0;
+        res.phase = res.label = 'NO SIGNAL';
+        return res;
+    }
+
+    var event = updateEdgeState(hrSession, hr.bpm, wc.ceiling, res.climax > 0, now);
+    if(event === 'edge'){ onEdge(); }
+
+    var base;
+    if(hrSession.edged){
+        base = 0;
+        res.phase = res.label = 'EDGE';
+    }else{
+        base = approachFactor(hr.bpm, wc.ceiling, cfg.band, cfg.floor);
+        res.phase = base < 1 ? 'EASING' : 'FREE';
+        var since = hrSession.releasedAt != null ? (now - hrSession.releasedAt) / 1000 : null;
+        var r = rejoinFactor(since, cfg.rejoinSec);
+        if(r < base){
+            base = r;
+            res.phase = 'REJOINING';
+            res.label = 'REJOINING ' + Math.max(1, Math.ceil(cfg.rejoinSec - since)) + ' s';
+        }else if(r >= 1){
+            hrSession.releasedAt = null; // ramp finished
+        }
+        if(res.phase === 'EASING'){ res.label = 'EASING ' + Math.round(base * 100) + '%'; }
+        if(res.phase === 'FREE'){ res.label = 'FREE'; }
+    }
+    if(res.climax > 0){
+        base = base + (1 - base) * res.climax;
+        res.phase = 'CLIMAX';
+        res.label = 'CLIMAX ' + Math.round(res.climax * 100) + '%';
+    }
+    res.a = base;
+    return res;
+}
+
+// Scale one funscript position (0-100, after invert) by the allowance. Stroke shortens
+// from the bottom of its range; every other axis shrinks toward its home position.
+function shapePosition(axis, pos, a){
+    if(a >= 1){ return pos; }
+    if(axis === "L0"){ return pos * a; }
+    var lo = parseInt(AXIS[axis].limits[0]), hi = parseInt(AXIS[axis].limits[1]);
+    var home = hi > lo ? (getCenter(axis) - lo) / (hi - lo) * 100 : 50;
+    return home + (pos - home) * a;
+}
+
+function onEdge(){
+    showToast("Edge " + hrSession.edges, "Holding until your heart rate drops " + EDGE_RELEASE_BPM + " BPM", "warning", 3000);
+    debug("[TCode] Edge " + hrSession.edges + " at " + hr.bpm + " BPM");
+}
+
+function resetHrSession(){
+    hrSession.edged = false;
+    hrSession.edges = 0;
+    hrSession.releasedAt = null;
+    refreshGovernor();
+}
+
+// Scene time of the bound player in ms (transcode offset included), or null.
+function currentSceneMs(){
+    if(!boundPlayer){ return null; }
+    return Math.floor(boundPlayer.currentTime * 1000) + streamOffsetMs + (parseInt(settings.sync) || 0);
+}
+
+// Re-evaluate outside playback (on each HR reading, settings changes) so edges are
+// counted and the UI stays current even while the video is paused.
+function refreshGovernor(){
+    lastGov = computeAllowance(Date.now(), currentSceneMs());
+    updateGovUi();
+}
+
+function govStatusText(g){
+    if(!g || g.phase === 'OFF'){ return "Off"; }
+    var parts = [];
+    if(g.bpm != null && g.phase !== 'NO MONITOR'){ parts.push(g.bpm + " BPM"); }
+    if(g.ceiling != null){ parts.push("ceiling " + g.ceiling + (g.decay ? " (−" + g.decay + ")" : "")); }
+    parts.push(hrSession.edges + (hrSession.edges === 1 ? " edge" : " edges"));
+    parts.push(g.label);
+    return parts.join(" · ");
+}
+
+function updateGovUi(){
+    var line = document.getElementById('tcode-gov-status');
+    if(line){ line.textContent = govStatusText(lastGov); }
+}
+
+// ---------------------------------
+
 function listAxes(exclude=""){
     var keys = Object.keys(AXIS);
     let removeAxis = keys.indexOf(exclude);
@@ -1434,6 +1689,7 @@ function currentAction(ms){
         // This no longer depends on the "seeking" event firing.
         var jumped = (lastActionMs === null) || (ms < lastActionMs) || (ms - lastActionMs > SEEK_THRESHOLD_MS);
         lastActionMs = ms;
+        var gov = lastGov = computeAllowance(Date.now(), ms);
         for(var x in AXIS){
             if(!settings.axes[x].enabled || AXIS[x].acts == null || AXIS[x].limits == null){ continue; }
             if(jumped){ AXIS[x].index = seekIndex(AXIS[x].acts, ms); }
@@ -1450,6 +1706,7 @@ function currentAction(ms){
                     if(AXIS[x].acts[i] && AXIS[x].acts[i].at > ms){
                         var pos = AXIS[x].acts[i].pos;
                         if (settings.axes[x].invert) { pos = 100 - pos; }
+                        pos = shapePosition(x, pos, gov.a); // heart-rate modulation (a = 1 when off)
                         // Map funscript 0-100 straight onto the axis range in device units
                         // (0-9999). The old "/100" collapsed this to 0-99 before sending.
                         var act = Math.round(((pos/100) * (AXIS[x].limits[1] - AXIS[x].limits[0])) + parseInt(AXIS[x].limits[0]));
