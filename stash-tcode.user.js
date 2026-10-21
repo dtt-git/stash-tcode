@@ -180,7 +180,7 @@ function saveSettings(saveToDevice=true){
 function loadSettings(){
     var thisVersion = GM_info.script.version;
     var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true}; };
-    var defaultSettings = {"debug": false, "sync": 0,
+    var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null,
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
@@ -898,7 +898,7 @@ function toggleMenu() {
     usbBtn.onclick = function() { connectSerial(); };
     if (serialConnected) usbBtn.disabled = true;
     deviceContentDiv.appendChild(usbBtn);
-    deviceContentDiv.appendChild(document.createElement("br"));
+    settingsAddTabContent(deviceContentDiv, "checkbox", "autoConnect", "Reconnect automatically (page load and re-plug)");
     deviceContentDiv.appendChild(document.createElement("br"));
     settingsAddSingleSlider(deviceContentDiv, "sync", "Sync:", settings.sync, -250, 250);
     settingsAddTabContent(deviceContentDiv, "checkbox", "homeEnabled", "Home axes on connect & scene change");
@@ -960,35 +960,90 @@ function toggleMenu() {
 
 // --- WEB SERIAL IMPLEMENTATION ---
 
+// Ask the user to pick a port (needs a click), then open it.
 async function connectSerial() {
     if (!navigator.serial) {
         alert("Web Serial API is NOT available.\n\nUse a Chromium-based browser, and either serve Stash over HTTPS or add " + location.origin + " to 'Insecure origins treated as secure' in chrome://flags.");
         return;
     }
-
+    var picked;
     try {
-        port = await navigator.serial.requestPort();
-        await port.open({ baudRate: 115200 }); // Standard TCode Baud Rate
-        const textEncoder = new TextEncoderStream();
-        writableStreamClosed = textEncoder.readable.pipeTo(port.writable);
-        writer = textEncoder.writable.getWriter();
-        serialConnected = true;
-        keepReading = true;
-        var usbBtn = document.getElementById("btnConnectUSB");
-        if (usbBtn) {
-            usbBtn.innerText = "USB Connected";
-            usbBtn.disabled = true;
-        }
-        debug("USB Serial Connected");
-        createOverlay("USB Connected");
-        showToast("USB Connected", "Serial connection established at 115200 baud", "success");
-        updateNavButton(); // reflect connected state on the navbar
-        readSerialLoop();
+        picked = await navigator.serial.requestPort();
     } catch (e) {
-        console.error("Serial Connection Failed:", e);
-        showToast("Connection Failed", e.message, "error");
-        alert("Could not connect to Serial device. \n" + e.message);
+        if (e.name !== "NotFoundError") { showToast("Connection Failed", e.message, "error"); } // NotFoundError = picker cancelled
+        return;
     }
+    await openPort(picked, false);
+}
+
+// Open a port and wire up the writer and read loop. `silent` is for automatic reconnects:
+// failures are only logged, since the user didn't ask for anything.
+async function openPort(p, silent) {
+    if (serialConnected) { return true; }
+    try {
+        await p.open({ baudRate: 115200 }); // Standard TCode Baud Rate
+    } catch (e) {
+        console.error("[TCode] Serial open failed:", e);
+        if (!silent) { showToast("Connection Failed", e.message, "error"); }
+        return false;
+    }
+    port = p;
+    const textEncoder = new TextEncoderStream();
+    writableStreamClosed = textEncoder.readable.pipeTo(port.writable);
+    writer = textEncoder.writable.getWriter();
+    serialConnected = true;
+    simulatedDevice = false;
+    keepReading = true;
+    // Remember which device this was so it can be reopened without the picker next time.
+    try {
+        var info = port.getInfo();
+        settings.serialPort = { usbVendorId: info.usbVendorId ?? null, usbProductId: info.usbProductId ?? null };
+        GM_setValue("settings", settings);
+    } catch (e) { debug("[TCode] getInfo failed: " + e); }
+    var usbBtn = document.getElementById("btnConnectUSB");
+    if (usbBtn) {
+        usbBtn.innerText = "USB Connected";
+        usbBtn.disabled = true;
+    }
+    debug("USB Serial Connected");
+    createOverlay("USB Connected");
+    showToast(silent ? "USB Reconnected" : "USB Connected", "Serial connection established at 115200 baud", "success");
+    updateNavButton(); // reflect connected state on the navbar
+    readSerialLoop();
+    return true;
+}
+
+// The previously used port among those this site already has permission for: an exact
+// USB vendor/product match, or the only granted port if nothing was saved yet.
+function pickSavedPort(ports) {
+    var saved = settings.serialPort;
+    if (saved && saved.usbVendorId != null) {
+        var match = ports.find(function(p) {
+            var i = p.getInfo();
+            return i.usbVendorId === saved.usbVendorId && i.usbProductId === saved.usbProductId;
+        });
+        if (match) { return match; }
+    }
+    return ports.length === 1 ? ports[0] : null;
+}
+
+// Reopen a port the user granted earlier. Granted ports can be opened without a click,
+// so this runs on page load and again whenever a device is plugged in.
+async function autoConnectSerial() {
+    if (!navigator.serial || serialConnected || settings.autoConnect === false) { return; }
+    var ports;
+    try { ports = await navigator.serial.getPorts(); } catch (e) { return; }
+    var p = pickSavedPort(ports);
+    if (p) { await openPort(p, true); }
+}
+
+function startSerialAutoConnect() {
+    if (!navigator.serial) { return; }
+    navigator.serial.addEventListener("connect", function() {
+        debug("[TCode] Serial device plugged in");
+        autoConnectSerial();
+    });
+    autoConnectSerial();
 }
 
 async function readSerialLoop() {
@@ -1007,6 +1062,14 @@ async function readSerialLoop() {
     // Loop exited -> port no longer readable (device unplugged / closed). Reflect that.
     serialConnected = false;
     writer = null;
+    // Close our side so the same port can be reopened when the device comes back.
+    try { await port.close(); } catch (e) { debug("[TCode] port.close after disconnect: " + e); }
+    var usbBtn = document.getElementById("btnConnectUSB");
+    if (usbBtn) {
+        usbBtn.innerText = "🔗 Connect Serial (USB)";
+        usbBtn.disabled = false;
+    }
+    showToast("USB Disconnected", settings.autoConnect !== false ? "Will reconnect when the device is plugged back in" : "", "warning");
     updateNavButton();
     debug("[TCode] Serial disconnected");
 }
@@ -1720,4 +1783,5 @@ function waitForPageChange(){
 
 publishDebugApi();
 startNavButton();
+startSerialAutoConnect();
 waitForPageChange();
