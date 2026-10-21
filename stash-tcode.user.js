@@ -1006,7 +1006,6 @@ async function openPort(p, silent) {
         usbBtn.disabled = true;
     }
     debug("USB Serial Connected");
-    createOverlay("USB Connected");
     showToast(silent ? "USB Reconnected" : "USB Connected", "Serial connection established at 115200 baud", "success");
     updateNavButton(); // reflect connected state on the navbar
     readSerialLoop();
@@ -1662,27 +1661,6 @@ function loadCurrentLimits(){
     setPendingFalse();
 }
 
-function hideOverlay(){ try{ document.querySelector('#overlay').hidden = "true"; }catch{ return ""; } }
-
-function createOverlay(text){
-    var video = document.querySelector("#VideoJsPlayer_html5_api");
-    if(video){
-        video = video.parentNode;
-        var overlayElement = document.createElement('div');
-        overlayElement.setAttribute('id', 'overlay');
-        overlayElement.style = "position: absolute;z-index: 999999999999999;left: 50%;transform: translateX(-50%); font-size: 2.5em; color: white; -webkit-text-stroke-width: .75px; -webkit-text-stroke-color: black;";
-        overlayElement.innerHTML = "<h2></h2>";
-        video.appendChild(overlayElement);
-        show(text);
-    }else{ setTimeout(show, 500, text); }
-}
-
-function show(text){
-    var overlay = document.querySelector('#overlay');
-    if(!overlay){ createOverlay(text); }
-    else{ overlay.childNodes[0].innerText = text; overlay.removeAttribute("hidden"); setTimeout(hideOverlay, 1000); }
-}
-
 function limits2socket(axis=""){
     function sendAxis2socket(axis){
         if(AXIS[axis] && AXIS[axis].limits){
@@ -1693,7 +1671,6 @@ function limits2socket(axis=""){
 }
 
 function setLimits(min, max, axis="L0", save=true){
-    show(axis + ": " + min + " - " + max);
     if(!AXIS[axis]){ return -1; }
     if(AXIS[axis].limits == null){ AXIS[axis].limits = new Array(); }
     AXIS[axis].limits[0] = min; AXIS[axis].limits[1] = max;
