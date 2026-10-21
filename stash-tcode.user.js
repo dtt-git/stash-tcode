@@ -112,7 +112,7 @@ function saveSettings(){
 function loadSettings(){
     var thisVersion = GM_info.script.version;
     var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5,
-                                                  speedLimit: false, maxSpeed: 5, link: ""}; };
+                                                  speedLimit: false, maxSpeed: 5, link: "", linkOverride: false}; };
     var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true, "knownAxes": [],
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
@@ -660,7 +660,7 @@ function buildAxisGroup(card, axis){
             function(lo, hi){ applyRange(lo, hi, true); }).el, {sub: true});
     uiSetting(group, "Invert", "Flip the direction of this axis.",
         uiSwitch('invert' + axis, cfg.invert, function(v){ cfg.invert = v; saveSettings(); }), {sub: true});
-    var autoRow, freqRow;
+    var autoRow, freqRow, overrideRow;
     var linkSelect = el('select', {id: 'tcode-link' + axis, class: 'input-control form-control form-control-sm', style: 'width: 160px'},
         [el('option', {value: '', text: 'Off'})].concat(AXIS_LIST.filter(function(o){ return o !== axis; }).map(function(o){
             return el('option', {value: o, text: o + ' · ' + AXIS_NAMES[o]});
@@ -668,12 +668,16 @@ function buildAxisGroup(card, axis){
     linkSelect.value = cfg.link || '';
     linkSelect.addEventListener('change', function(){
         cfg.link = linkSelect.value;
+        overrideRow.classList.toggle('disabled', !cfg.link);
         autoRow.classList.toggle('disabled', !!cfg.link);
         freqRow.classList.toggle('disabled', !!cfg.link || !cfg.auto);
         saveSettings();
     });
-    uiSetting(group, "Follow", "When the scene has no script for this axis, copy another axis's motion: it moves to the same point in this axis's range.",
+    uiSetting(group, "Follow", "Copy another axis's motion: this axis moves to the same point in its own range. Applies when the scene has no script for this axis.",
         linkSelect, {sub: true});
+    overrideRow = uiSetting(group, "Override script", "Follow even when the scene has a script for this axis, ignoring that script.",
+        uiSwitch('linkOverride' + axis, cfg.linkOverride, function(v){ cfg.linkOverride = v; saveSettings(); }),
+        {sub: true, disabled: !cfg.link});
     autoRow = uiSetting(group, "Auto motion", "When the scene has no script for this axis, move in a smooth sine wave instead.",
         uiSwitch('auto' + axis, cfg.auto, function(v){ cfg.auto = v; freqRow.classList.toggle('disabled', !v || !!cfg.link); saveSettings(); }),
         {sub: true, disabled: !!cfg.link});
@@ -2057,7 +2061,8 @@ function autoMotion(axis, ms, jumped, a){
 // heads to a script position (0-100) over some time, the follower heads to the same
 // position within its own range over the same time. The source's raw position is used
 // (before its invert), so the follower's own range and invert decide how it moves.
-// Precedence on an axis: its own script, then following, then auto motion.
+// Precedence on an axis: its own script, then following, then auto motion; with
+// "Override script" on, following wins over the axis's own script too.
 
 var tickMoves = {};   // axis -> {pos, int}: raw positions sent during this playback tick
 
@@ -2082,7 +2087,7 @@ function emitLinkedMoves(a){
             var cfg = settings.axes[axis];
             var src = cfg && cfg.link;
             if(!src || src === axis || !cfg.enabled || !AXIS[axis] || AXIS[axis].limits == null){ return; }
-            if(AXIS[axis].acts != null){ return; }            // its own script wins
+            if(AXIS[axis].acts != null && !cfg.linkOverride){ return; } // its own script wins, unless overridden
             if(tickMoves[axis] || !tickMoves[src]){ return; }
             emitAxisMove(axis, tickMoves[src].pos, tickMoves[src].int, a);
             progressed = true;
@@ -2238,6 +2243,8 @@ function currentAction(ms){
                 if(!settings.axes[x].link && settings.axes[x].auto){ autoMotion(x, ms, jumped, gov.a); }
                 continue;
             }
+            // Following with "Override script": ignore this axis's own script entirely.
+            if(settings.axes[x].link && settings.axes[x].linkOverride){ continue; }
             if(jumped){ AXIS[x].index = seekIndex(AXIS[x].acts, ms); }
             // Re-seat rather than give up when the index has run off the end (video
             // ended, or a seek left it stranded). The old guard skipped the whole

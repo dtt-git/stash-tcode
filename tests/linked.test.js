@@ -14,7 +14,7 @@ function world(cfg) {
         var settings = { axes: {} }, AXIS = {};
         AXIS_LIST.forEach(function(ax){
             var c = CFG[ax] || {};
-            settings.axes[ax] = { enabled: c.enabled !== false, invert: !!c.invert, link: c.link || "" };
+            settings.axes[ax] = { enabled: c.enabled !== false, invert: !!c.invert, link: c.link || "", linkOverride: !!c.override };
             AXIS[ax] = { limits: c.limits || [0, 9999], acts: c.scripted ? [{ at: 0, pos: 0 }] : null };
         });`;
     return new Function('CFG', env + section + `
@@ -39,6 +39,10 @@ check('source invert not inherited, follower invert applied', JSON.stringify(w.s
 w = world({ L0: { scripted: true }, R0: { link: 'L0', scripted: true } });
 w.emit('L0', 50, 100, 1); w.linked(1);
 check('axis with its own script ignores the link', JSON.stringify(w.sent()) === JSON.stringify(['L0:5000@100']), w.sent());
+
+w = world({ L0: { scripted: true }, R0: { link: 'L0', scripted: true, override: true } });
+w.emit('L0', 50, 100, 1); w.linked(1);
+check('with Override script, the link wins over its own script', JSON.stringify(w.sent()) === JSON.stringify(['L0:5000@100', 'R0:5000@100']), w.sent());
 
 // Nothing from the source this tick: follower stays put.
 w = world({ L0: { scripted: true }, R0: { link: 'L0' } });
