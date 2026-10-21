@@ -119,7 +119,7 @@ function loadSettings(){
                            "hr": { deviceId: null, deviceName: null, enabled: false,
                                    restingHr: 70, climaxHr: 140, band: 10, floor: 30, rejoinSec: 8, timeoutSec: 8,
                                    decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105,
-                                   climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15 },
+                                   climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15, climaxTag: "Climax" },
                            "currentVersion": thisVersion};
     settings = GM_getValue("settings", defaultSettings);
     handleUpgrade(thisVersion);
@@ -737,6 +737,54 @@ function buildHrTab(body){
     decayRows.forEach(function(r){ r.classList.toggle('disabled', !cfg.decay); });
 }
 
+// ---- Climax tab ----
+SETTINGS_TABS.splice(3, 0, { id: 'climax', label: 'Climax', build: buildClimaxTab });
+
+function buildClimaxTab(body){
+    var cfg = settings.hr;
+    var sec = function(v){ return v + " s"; };
+    var changed = function(){ saveSettings(); refreshGovernor(); };
+
+    var main = uiSection(body, "Climax markers",
+        "Scene markers with this tag release the limiter: strokes build to full before the marker and stay full, whatever your heart rate. Works with heart-rate modulation on.");
+    var tagInput = el('input', {type: 'text', id: 'tcode-climaxTag', class: 'input-control form-control form-control-sm', value: cfg.climaxTag,
+                                style: 'width: 160px', spellcheck: 'false'});
+    tagInput.addEventListener('change', function(){
+        cfg.climaxTag = tagInput.value.trim() || "Climax";
+        tagInput.value = cfg.climaxTag;
+        saveSettings();
+        fetchClimaxMarkers();
+    });
+    uiSetting(main, "Marker tag", "Primary or secondary tag. Add markers in Stash's Markers tab, or with the button below.", tagInput);
+
+    var onScene = isFinite(getSceneId());
+    var hint, list = null;
+    if(!onScene){ hint = "Open a scene to see its climax markers."; }
+    else if(!climaxMarkers.length){ hint = "No climax markers in this scene yet."; }
+    else {
+        hint = climaxMarkers.length + (climaxMarkers.length === 1 ? " marker. Click a time to jump to it." : " markers. Click a time to jump to it.");
+        list = el('ul', {class: 'tcode-list'}, climaxMarkers.map(function(m){
+            return el('li', null, [
+                el('a', {href: '#', text: formatTime(m.seconds) + (m.end != null ? " – " + formatTime(m.end) : ""), onclick: function(e){
+                    e.preventDefault();
+                    if(boundPlayer){ boundPlayer.currentTime = Math.max(0, m.seconds - streamOffsetMs / 1000); }
+                }})
+            ]);
+        }));
+    }
+    var row = uiSetting(main, "This scene", hint,
+        uiButton("Mark climax here", "primary", markClimaxHere, {disabled: !onScene || !boundPlayer}));
+    if(list){ row.firstChild.appendChild(list); }
+
+    var timing = uiSection(body, "Timing");
+    uiSetting(timing, "Build-up", "How long before the marker strokes start climbing back to full.",
+        uiRange('climaxRamp', cfg.climaxRampSec, {min: 0, max: 180, format: sec}, null, function(v){ cfg.climaxRampSec = v; changed(); }).el);
+    uiSetting(timing, "Hold", "How long strokes stay full after the marker. Markers with an end time hold for their whole range instead.",
+        uiRange('climaxHold', cfg.climaxHoldSec, {min: 5, max: 180, format: sec}, null, function(v){ cfg.climaxHoldSec = v; changed(); }).el);
+    uiSetting(timing, "Ease back", "How long it takes to hand control back to your heart rate afterwards.",
+        uiRange('climaxEase', cfg.climaxEaseSec, {min: 0, max: 180, format: sec}, null, function(v){ cfg.climaxEaseSec = v; changed(); }).el);
+}
+
 // --- WEB SERIAL IMPLEMENTATION ---
 
 // Ask the user to pick a port (needs a click), then open it.
@@ -1173,6 +1221,114 @@ function publishDebugApi(){
 
 // ---------------------------------
 
+// --- STASH GRAPHQL ---
+function stashGql(query, variables){
+    return new Promise(function(resolve, reject){
+        GM_xmlhttpRequest({
+            method: "POST",
+            url: location.protocol + '//' + location.host + '/graphql',
+            data: JSON.stringify({ query: query, variables: variables || {} }),
+            cookie: document.cookie,
+            anonymous: true,
+            headers: { "Content-Type": "application/json" },
+            onload: function(r){
+                try {
+                    var j = JSON.parse(r.response);
+                    if(j.errors && j.errors.length){ reject(new Error(j.errors[0].message)); }
+                    else { resolve(j.data); }
+                } catch(e) { reject(e); }
+            },
+            onerror: function(){ reject(new Error("Couldn't reach Stash")); }
+        });
+    });
+}
+
+// --- CLIMAX MARKERS ---
+// Stash scene markers tagged with settings.hr.climaxTag release the HR limiter around
+// their time (see climaxFactor). A marker with an end time holds for its whole range.
+
+var climaxMarkers = [];     // [{id, seconds, end}] for the current scene, sorted
+var climaxSceneId = null;
+var climaxPollTimer = null;
+
+function isClimaxMarker(m, tag){
+    tag = String(tag || "").trim().toLowerCase();
+    if(!tag){ return false; }
+    var names = [m.primary_tag && m.primary_tag.name].concat((m.tags || []).map(function(t){ return t.name; }));
+    return names.some(function(n){ return n && n.toLowerCase() === tag; });
+}
+
+async function fetchClimaxMarkers(){
+    var id = getSceneId();
+    if(!isFinite(id)){ setClimaxMarkers(null, []); return; }
+    try {
+        var data = await stashGql("query($id: ID!){ findScene(id: $id){ scene_markers { id seconds end_seconds title primary_tag { name } tags { name } } } }",
+                                  { id: String(id) });
+        if(getSceneId() !== id){ return; } // navigated away meanwhile
+        var all = (data.findScene && data.findScene.scene_markers) || [];
+        var list = all.filter(function(m){ return isClimaxMarker(m, settings.hr.climaxTag); })
+                      .map(function(m){ return { id: m.id, seconds: m.seconds, end: m.end_seconds != null && m.end_seconds > m.seconds ? m.end_seconds : null }; })
+                      .sort(function(a, b){ return a.seconds - b.seconds; });
+        setClimaxMarkers(id, list);
+    } catch(e) {
+        debug("[TCode] Climax markers: " + e.message);
+    }
+}
+
+function setClimaxMarkers(sceneId, list){
+    var changed = sceneId !== climaxSceneId || JSON.stringify(list) !== JSON.stringify(climaxMarkers);
+    climaxSceneId = sceneId;
+    climaxMarkers = list;
+    climaxMarksMs = list.map(function(m){
+        return { at: Math.round(m.seconds * 1000), hold: m.end != null ? Math.round((m.end - m.seconds) * 1000) : null };
+    });
+    if(changed){
+        refreshSettingsTab('climax');
+        refreshGovernor();
+    }
+}
+
+// Re-read markers now and then, so ones added in Stash's own marker editor are picked up.
+function startClimaxPolling(){
+    if(climaxPollTimer){ return; }
+    climaxPollTimer = setInterval(function(){
+        if(location.href.indexOf('/scenes/') !== -1){ fetchClimaxMarkers(); }
+    }, 20000);
+}
+
+async function findOrCreateTag(name){
+    var found = await stashGql("query($name: String!){ findTags(tag_filter: { name: { value: $name, modifier: EQUALS } }, filter: { per_page: 1 }){ tags { id } } }",
+                               { name: name });
+    if(found.findTags.tags.length){ return found.findTags.tags[0].id; }
+    var created = await stashGql("mutation($name: String!){ tagCreate(input: { name: $name }){ id } }", { name: name });
+    return created.tagCreate.id;
+}
+
+// Add a climax marker at the current playhead (creating the tag if needed).
+async function markClimaxHere(){
+    var id = getSceneId();
+    if(!isFinite(id) || !boundPlayer){ showToast("No Scene", "Open a scene to add a marker", "warning"); return; }
+    var seconds = Math.round((boundPlayer.currentTime + streamOffsetMs / 1000) * 10) / 10;
+    var tag = String(settings.hr.climaxTag || "").trim() || "Climax";
+    try {
+        var tagId = await findOrCreateTag(tag);
+        await stashGql("mutation($input: SceneMarkerCreateInput!){ sceneMarkerCreate(input: $input){ id } }",
+                       { input: { title: tag, seconds: seconds, scene_id: String(id), primary_tag_id: tagId } });
+        showToast("Climax Marker Added", "At " + formatTime(seconds) + ". Reload to see it in Stash's Markers tab.", "success", 5000);
+        await fetchClimaxMarkers();
+    } catch(e) {
+        showToast("Couldn't Add Marker", e.message, "error");
+    }
+}
+
+function formatTime(sec){
+    sec = Math.max(0, Math.round(sec));
+    var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(s).padStart(2, '0');
+}
+
+// ---------------------------------
+
 /* Stash Integration */
 function fetchSceneInfo(id){
     GM_xmlhttpRequest({
@@ -1459,17 +1615,21 @@ function rejoinFactor(sinceSec, rejoinSec){
 
 // How far climax marks have taken over at sceneMs, 0-1: climbs over rampMs before a
 // mark, holds at 1 for holdMs, then eases back over easeMs. The strongest mark wins.
+// A mark is a time in ms, or {at, hold} where a non-null hold overrides holdMs (a
+// Stash marker with an end time holds for its whole range).
 function climaxFactor(sceneMs, marks, rampMs, holdMs, easeMs){
     if(sceneMs == null || !marks || !marks.length){ return 0; }
     var k = 0;
     for(var mark of marks){
-        var d = mark - sceneMs; // > 0: mark still ahead
+        var at = typeof mark === 'number' ? mark : mark.at;
+        var hold = typeof mark === 'number' || mark.hold == null ? holdMs : mark.hold;
+        var d = at - sceneMs; // > 0: mark still ahead
         if(d > 0){
             if(rampMs > 0 && d <= rampMs){ k = Math.max(k, 1 - d / rampMs); }
-        }else if(-d <= holdMs){
+        }else if(-d <= hold){
             k = 1;
-        }else if(easeMs > 0 && -d <= holdMs + easeMs){
-            k = Math.max(k, 1 - (-d - holdMs) / easeMs);
+        }else if(easeMs > 0 && -d <= hold + easeMs){
+            k = Math.max(k, 1 - (-d - hold) / easeMs);
         }
     }
     return Math.max(0, Math.min(1, k));
@@ -1760,12 +1920,34 @@ function updateTime(player){
     }
 }
 
+// One watcher for the whole page lifetime, started at load, independent of the device:
+// the climax markers and overlay need the player even with nothing connected.
+var playerWatchStarted = false;
+function startPlayerWatch(){
+    if(playerWatchStarted){ return; }
+    playerWatchStarted = true;
+    waitForVideoPlayer();
+}
+
+function unbindPlayer(){
+    if(!boundPlayer){ return; }
+    boundPlayer.removeEventListener("seeking", resetIndex, false);
+    boundPlayer.removeEventListener("seeked", resetIndex, false);
+    boundPlayer.removeEventListener("ended", resetIndex, false);
+    boundPlayer.removeEventListener("emptied", resetIndex, false);
+    boundPlayer = null;
+}
+
 function waitForVideoPlayer(){
-    var player = document.querySelector('video');
+    // Only the scene player counts: other pages (the scene wall, marker lists) have
+    // preview <video>s of their own.
+    var player = isFinite(getSceneId())
+        ? (document.querySelector('#VideoJsPlayer_html5_api') || document.querySelector('video.vjs-tech') || document.querySelector('video'))
+        : null;
     if(!player){
         // The element can disappear between scenes; drop the stale binding so the
         // replacement gets wired up instead of leaving listeners on a detached node.
-        boundPlayer = null;
+        unbindPlayer();
         setTimeout(waitForVideoPlayer, 500);
         return;
     }
@@ -1774,12 +1956,7 @@ function waitForVideoPlayer(){
     // to the old element and seeks stopped resetting the index -- which is why only a
     // page navigation restored playback.
     if(boundPlayer !== player){
-        if(boundPlayer){
-            boundPlayer.removeEventListener("seeking", resetIndex, false);
-            boundPlayer.removeEventListener("seeked", resetIndex, false);
-            boundPlayer.removeEventListener("ended", resetIndex, false);
-            boundPlayer.removeEventListener("emptied", resetIndex, false);
-        }
+        unbindPlayer();
         player.addEventListener("seeking", resetIndex, false);
         // "seeking" doesn't fire in every path that moves the playhead (notably
         // resuming after the video ended), so also reset on completion.
@@ -1910,7 +2087,16 @@ function init(){
 
 function getSceneId(){ return parseInt(location.href.split('/scenes/')[1]); }
 
+// Device-side setup for the current scene, once a device is connected. Each scene
+// change supersedes the previous call, so waits don't pile up while disconnected.
+var mainToken = 0;
 function main(){
+    var token = ++mainToken;
+    mainAttempt(token);
+}
+
+function mainAttempt(token){
+    if(token !== mainToken){ return; }
     if(serialConnected){
         // Restore saved ranges FIRST, synchronously, before anything (centerAxis or the
         // device D2 reply) can call setLimits and trigger a save.
@@ -1941,8 +2127,7 @@ function main(){
             ["L0","L1","L2","R0","R1","R2"].forEach(ax => centerAxis(ax));
         }
         fetchSceneInfo(getSceneId());
-        waitForVideoPlayer();
-    }else{ setTimeout(main, 500); }
+    }else{ setTimeout(function(){ mainAttempt(token); }, 500); }
 }
 
 function cleanUpOptions(list){
@@ -1976,7 +2161,11 @@ function waitForPageChange(){
 
     if(location.href.indexOf('/scenes/') != -1){
         init(); main();
-    }else{ videoPlayerLoaded = false; }
+        fetchClimaxMarkers();
+    }else{
+        videoPlayerLoaded = false;
+        setClimaxMarkers(null, []);
+    }
     setTimeout(waitForPageChange, 500);
 }
 
@@ -1984,4 +2173,6 @@ publishDebugApi();
 startNavButton();
 startSerialAutoConnect();
 autoConnectHr();
+startClimaxPolling();
+startPlayerWatch();
 waitForPageChange();

@@ -78,6 +78,10 @@ check('at mark = 1', k(100) === 1);
 check('hold = 1', k(119) === 1 && k(120) === 1);
 check('ease middle = 0.5', near(k(127.5), 0.5));
 check('after ease = 0', k(136) === 0);
+check('range marker holds for its range', api.climaxFactor(150000, [{ at: 100000, hold: 60000 }], 45000, 20000, 15000) === 1
+    && near(api.climaxFactor(167500, [{ at: 100000, hold: 60000 }], 45000, 20000, 15000), 0.5));
+check('object mark without hold uses default', api.climaxFactor(119000, [{ at: 100000, hold: null }], 45000, 20000, 15000) === 1
+    && api.climaxFactor(136000, [{ at: 100000, hold: null }], 45000, 20000, 15000) === 0);
 check('strongest mark wins', near(api.climaxFactor(85000, [100000, 80000], 45000, 20000, 15000), 1) && near(api.climaxFactor(77500, [100000, 80000], 45000, 20000, 15000), 1 - 2500 / 45000));
 
 // --- computeAllowance end to end ---
