@@ -1,10 +1,10 @@
-# Stash-TCode (USB Fix)
+# Stash-TCode
 
 A Tampermonkey userscript that drives TCode devices (OSR2/SR6 and similar) from
 [Stash](https://github.com/stashapp/stash) over USB using the Web Serial API.
 It plays a scene's funscripts, including multi-axis ones, on the device in sync with the video.
 
-Based on Stash-TCode by Steel (Spunkle-Modded), licensed GPLv3.
+Maintained by **dtt**. Originally based on Stash-TCode by Steel, with modifications by Spunkle.
 
 ## Features
 
@@ -40,6 +40,14 @@ with no copy-paste into Tampermonkey:
 
 If Tampermonkey seems to serve a stale copy, set **Settings → Externals → Update interval**
 to *Always*.
+
+## Credits
+
+- **dtt**: current maintainer.
+- **Steel**: wrote the original Stash-TCode userscript.
+- **Spunkle**: made the modded version this project builds on.
+
+Licensed under the [GNU GPL v3](LICENSE), the same as the original.
 
 ### Releasing
 

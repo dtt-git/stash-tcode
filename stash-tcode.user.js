@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Stash-TCode (USB Fix)
-// @namespace    Steel
-// @version      0.5.17-USB-Fix
+// @name         Stash-TCode
+// @namespace    https://github.com/dtt-git/stash-tcode
+// @version      0.5.18
 // @description  Integrate TCode Devices with Stash via USB Web Serial
-// @author       Steel (Spunkle-Modded), dtt
+// @author       dtt (originally by Steel, modded by Spunkle)
 // @include      http*://*:9999*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue

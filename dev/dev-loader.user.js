@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Stash-TCode (dev)
-// @namespace    Steel
+// @namespace    https://github.com/dtt-git/stash-tcode
 // @version      0.0.0-dev
 // @description  Dev loader: runs stash-tcode.user.js straight from your local clone
 // @include      http*://*:9999*
