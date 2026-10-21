@@ -118,12 +118,13 @@ Turn on **Advanced → Debug mode** to get:
 ### Tests
 
 The heart-rate governor's math (approach band, edge hysteresis, decay, rejoin ramp, climax window,
-watchdog and axis shaping), the auto-motion sine and the speed limit, plus heart-rate packet decoding,
-are covered by plain Node tests:
+watchdog and axis shaping), the auto-motion sine and the speed limit, plus heart-rate packet decoding and
+serial port selection, are covered by plain Node tests:
 
 ```
 node tests/governor.test.js
 node tests/hr-packets.test.js
+node tests/serial.test.js
 ```
 
 ### Releasing

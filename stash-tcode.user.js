@@ -113,7 +113,7 @@ function loadSettings(){
     var thisVersion = GM_info.script.version;
     var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5,
                                                   speedLimit: false, maxSpeed: 5}; };
-    var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true,
+    var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true, "knownAxes": [],
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
@@ -143,6 +143,11 @@ function loadSettings(){
         }
     }
     delete settings.speedLimit; delete settings.maxUnitsPerSec; delete settings.maxSpeed;
+    // Axes the device has reported before (see processLimits). Installs that have already
+    // connected a device have seen all of theirs, so their on/off choices stand.
+    if(settings.knownAxes === undefined){
+        settings.knownAxes = settings.serialPort ? ["L0", "L1", "L2", "R0", "R1", "R2"] : [];
+    }
     backfillDefaults(settings, defaultSettings);
     // Drop settings for features that no longer exist (hotkeys, random motion).
     for(const gone of ["device", "initialKey", "minKey", "settingsKey", "syncKey"]){ delete settings[gone]; }
@@ -795,7 +800,7 @@ function buildClimaxTab(body){
             return el('li', null, [
                 el('a', {href: '#', text: formatTime(m.seconds) + (m.end != null ? " – " + formatTime(m.end) : ""), onclick: function(e){
                     e.preventDefault();
-                    if(boundPlayer){ boundPlayer.currentTime = Math.max(0, m.seconds - streamOffsetMs / 1000); }
+                    seekScene(m.seconds);
                 }})
             ]);
         }));
@@ -864,15 +869,16 @@ async function openPort(p, silent) {
 }
 
 // The previously used port among those this site already has permission for: an exact
-// USB vendor/product match, or the only granted port if nothing was saved yet.
+// USB vendor/product match, or the only granted port if no USB device was saved yet.
+// A saved device that isn't present never falls back to some other granted port, which
+// could be anything (an Arduino, a different toy) and would be sent TCode.
 function pickSavedPort(ports) {
     var saved = settings.serialPort;
     if (saved && saved.usbVendorId != null) {
-        var match = ports.find(function(p) {
+        return ports.find(function(p) {
             var i = p.getInfo();
             return i.usbVendorId === saved.usbVendorId && i.usbProductId === saved.usbProductId;
-        });
-        if (match) { return match; }
+        }) || null;
     }
     return ports.length === 1 ? ports[0] : null;
 }
@@ -968,7 +974,8 @@ var hr = {
     battery: null,
     retry: 0,
     manualDisconnect: false,
-    rrSeen: false,      // this connection has sent beat timing (RR intervals) at least once
+    rrRun: 0,           // consecutive packets carrying beat timing (RR intervals)
+    rrReliable: false,  // this connection has sent beat timing consistently
     rejecting: null     // why the latest packets aren't counted: 'contact' | 'beats' | null
 };
 var hrPacketLog = [];   // debug: recent raw packets, newest last
@@ -997,13 +1004,16 @@ function parseHrMeasurement(view){
 
 // Whether a packet is a real reading. A strap taken off often keeps sending its last
 // BPM, so besides the obvious (too low to be a pulse) a packet doesn't count when the
-// sensor says it has no skin contact, or when a sensor that has been timing beats
-// (RR intervals) stops timing them. Rejected packets don't refresh the reading, so the
+// sensor says it has no skin contact. Sensors with no contact flag get a fallback: once
+// they've timed beats (RR intervals) consistently, a packet without beat timing doesn't
+// count. Watches and relay apps that only send RR now and then never become "reliable",
+// so they aren't caught by it. Rejected packets don't refresh the reading, so the
 // signal timeout trips as it would for a dropped connection.
-function hrPacketVerdict(m, rrSeen){
+var HR_RR_RELIABLE_RUN = 5;
+function hrPacketVerdict(m, rrReliable){
     if(m.bpm < HR_MIN_VALID){ return 'low'; }
     if(m.contact === false){ return 'contact'; }
-    if(rrSeen && m.rr === 0){ return 'beats'; }
+    if(m.contact === null && rrReliable && m.rr === 0){ return 'beats'; }
     return 'ok';
 }
 
@@ -1021,8 +1031,9 @@ function hrLive(){ return hr.status === 'live' && hr.bpm != null; }
 function onHrValue(e){
     var m = parseHrMeasurement(e.target.value);
     if(!m){ return; }
-    var verdict = hrPacketVerdict(m, hr.rrSeen);
-    if(m.rr > 0){ hr.rrSeen = true; }
+    var verdict = hrPacketVerdict(m, hr.rrReliable);
+    hr.rrRun = m.rr > 0 ? hr.rrRun + 1 : 0;
+    if(hr.rrRun >= HR_RR_RELIABLE_RUN){ hr.rrReliable = true; }
     if(settings.debug){
         hrPacketLog.push({ t: Date.now(), bpm: m.bpm, contact: m.contact, rr: m.rr, verdict: verdict });
         if(hrPacketLog.length > 600){ hrPacketLog.splice(0, hrPacketLog.length - 600); }
@@ -1081,7 +1092,8 @@ async function openHrGatt(silent){
         hr.characteristic = ch;
         hr.source = 'ble';
         hr.retry = 0;
-        hr.rrSeen = false;
+        hr.rrRun = 0;
+        hr.rrReliable = false;
         hr.rejecting = null;
         setHrStatus('live');
         readHrBattery(server);
@@ -1265,6 +1277,7 @@ function publishDebugApi(){
         tx: function(){ return txLog.slice(); },
         clearTx: function(){ txLog.length = 0; },
         simulateDevice: connectSimulatedDevice,
+        seek: seekScene, // jump the player to a scene time in seconds
         // Simulated heart rate: setHr(bpm) starts or updates it, setHr(null) stops it.
         setHr: function(bpm){ if(bpm == null){ stopHrSim(); } else { startHrSim(bpm); } },
         hr: function(){ return { bpm: hr.bpm, at: hr.at, ageMs: hr.at ? Date.now() - hr.at : null, contact: hr.contact,
@@ -1426,24 +1439,20 @@ function startHud(){
 // ---------------------------------
 
 // --- STASH GRAPHQL ---
+// A plain same-origin fetch: the browser attaches Stash's session cookie, which is
+// HttpOnly (invisible to document.cookie), so this also works when Stash has a login.
 function stashGql(query, variables){
-    return new Promise(function(resolve, reject){
-        GM_xmlhttpRequest({
-            method: "POST",
-            url: location.protocol + '//' + location.host + '/graphql',
-            data: JSON.stringify({ query: query, variables: variables || {} }),
-            cookie: document.cookie,
-            anonymous: true,
-            headers: { "Content-Type": "application/json" },
-            onload: function(r){
-                try {
-                    var j = JSON.parse(r.response);
-                    if(j.errors && j.errors.length){ reject(new Error(j.errors[0].message)); }
-                    else { resolve(j.data); }
-                } catch(e) { reject(e); }
-            },
-            onerror: function(){ reject(new Error("Couldn't reach Stash")); }
-        });
+    return fetch(location.origin + '/graphql', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: query, variables: variables || {} })
+    }).then(function(r){
+        if(!r.ok){ throw new Error("Stash returned " + r.status); }
+        return r.json();
+    }).then(function(j){
+        if(j.errors && j.errors.length){ throw new Error(j.errors[0].message); }
+        return j.data;
     });
 }
 
@@ -1525,6 +1534,16 @@ async function markClimaxHere(){
     }
 }
 
+// Jump the Stash player to a scene time. video.js takes scene time and copes with
+// transcoded streams, so go through it when it's reachable (it lives in the page's
+// JavaScript world, hence unsafeWindow); otherwise set the <video> directly.
+function seekScene(seconds){
+    var host = unsafeWindow.document.querySelector('.video-js');
+    var vjs = host && host.player;
+    if(vjs && typeof vjs.currentTime === 'function'){ vjs.currentTime(seconds); return; }
+    if(boundPlayer){ boundPlayer.currentTime = Math.max(0, seconds - streamOffsetMs / 1000); }
+}
+
 function formatTime(sec){
     sec = Math.max(0, Math.round(sec));
     var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
@@ -1535,22 +1554,16 @@ function formatTime(sec){
 
 /* Stash Integration */
 function fetchSceneInfo(id){
-    GM_xmlhttpRequest({
-        method: "POST",
-        url: location.protocol + '//' + location.host + '/graphql',
-        data: '{"operationName":"FindScene","variables":{"id":"' + id + '"},"query":"query FindScene($id: ID!, $checksum: String) {\\n  findScene(id: $id, checksum: $checksum) {\\n    ...SceneData\\n  }\\n}\\n\\nfragment SceneData on Scene {\\n  files {\\n    ...VideoFileData\\n  }\\n  paths {\\n    funscript\\n}\\n}\\n\\nfragment VideoFileData on VideoFile {\\n  path\\n}"}',
-        cookie: document.cookie,
-        anonymous: true,
-        headers: { "Content-Type": "application/json" },
-        onload: function(response){
-            var json = JSON.parse(response.response);
-            if(json.data && json.data.findScene && json.data.findScene.files.length > 0){
-                video = json.data.findScene.files[0].path;
+    stashGql("query($id: ID!){ findScene(id: $id){ files { path } } }", { id: String(id) })
+        .then(function(data){
+            var scene = data.findScene;
+            if(scene && scene.files.length > 0){
+                video = scene.files[0].path;
                 debug("Video: " + video);
                 fetchAllFunscripts();
             }
-        }
-    });
+        })
+        .catch(function(e){ console.error("[TCode] Couldn't load the scene:", e); });
 }
 
 function initAxis(name){
@@ -1657,8 +1670,6 @@ function fetchMainFunscript() {
     GM_xmlhttpRequest({
         method: "GET",
         url: url,
-        cookie: document.cookie,
-        anonymous: true,
         onload: function(response) {
             if (response.status == 200) {
                 try {
@@ -1722,21 +1733,13 @@ function fetchIndividualAxisFiles() {
 
 function fetchFunscript(axis, force=false){
     if(scriptList == null){
-        GM_xmlhttpRequest({
-            method: "POST",
-            url: location.protocol + '//' + location.host + '/graphql',
-            data: '{"operationName":"RunPluginOperation","variables":{"plugin_id":"StashInteractiveTools","args":{"mode":"init","scene_id":"' + getSceneId() + '","origin":"' + location.origin + '"}},"query":"mutation RunPluginOperation($plugin_id: ID!, $args: Map) {\\n  runPluginOperation(plugin_id: $plugin_id, args: $args)\\n}"}',
-            cookie: document.cookie,
-            anonymous: true,
-            headers: { "Content-Type": "application/json" },
-            onload: function(response){
-                var json = JSON.parse(response.response);
-                if(json.data && json.data.runPluginOperation){
-                    scriptList = json.data.runPluginOperation.scripts;
-                    fetchFunscript(axis);
-                }
-            }
-        });
+        // Ask the Stash Interactive Tools plugin for the scene's script list. Without the
+        // plugin (or if it fails) carry on with an empty list and try the default paths.
+        stashGql("mutation($plugin_id: ID!, $args: Map){ runPluginOperation(plugin_id: $plugin_id, args: $args) }",
+                 { plugin_id: "StashInteractiveTools", args: { mode: "init", scene_id: String(getSceneId()), origin: location.origin } })
+            .then(function(data){ scriptList = (data.runPluginOperation && data.runPluginOperation.scripts) || []; })
+            .catch(function(e){ debug("[TCode] StashInteractiveTools unavailable: " + e.message); scriptList = []; })
+            .then(function(){ fetchFunscript(axis); });
     }else{
         var chosenScript = document.querySelector('#stash-interactive-tools-select-funscripts');
         if(!chosenScript && !force){ setTimeout(function(){fetchFunscript(axis, true)}, 500); return -1; }
@@ -1749,7 +1752,7 @@ function fetchFunscript(axis, force=false){
         }
         if(chosenScript){ url = url + ".funscript"; }
         GM_xmlhttpRequest({
-            method: "GET", url: url, cookie: document.cookie, anonymous: true,
+            method: "GET", url: url,
             onload: function(response){
                 if(response.status == 200){
                     if(!AXIS[axis]){ AXIS[axis] = new Object(); }
@@ -2043,12 +2046,6 @@ function forgetAxisPositions(){
 
 // ---------------------------------
 
-function listAxes(exclude=""){
-    var keys = Object.keys(AXIS);
-    let removeAxis = keys.indexOf(exclude);
-    if (removeAxis !== -1) { keys.splice(removeAxis, 1); }
-    return keys;
-}
 
 // Clamp helper: returns an integer inside [0, 9999].
 function clamp9999(v){
@@ -2099,7 +2096,7 @@ function centerAxis(axis){
 // Park every enabled axis now (used by the Center Now button).
 function centerAll(){
     if(!serialConnected){ showToast("Not Connected", "Connect over USB first", "warning"); return -1; }
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => centerAxis(ax));
+    AXIS_LIST.forEach(ax => centerAxis(ax));
 }
 
 function queueMove(axis, pos, int){
@@ -2112,7 +2109,12 @@ function queueMove(axis, pos, int){
     int = Math.round(Number(int));
     if(!isFinite(int) || int < 0){ int = 0; }
     var cfg = settings.axes[axis];
-    if(cfg && cfg.speedLimit){ pos = limitSpeed(AXIS[axis].lastPos, pos, int, cfg.maxSpeed); }
+    if(cfg && cfg.speedLimit){
+        pos = limitSpeed(AXIS[axis].lastPos, pos, int, cfg.maxSpeed);
+        // Coming from outside a range that was just narrowed, the limited step can still
+        // be outside it; the range is the hard limit.
+        if(pos > hi){ pos = hi; } else if(pos < lo){ pos = lo; }
+    }
     AXIS[axis].lastPos = pos;
     // TCode magnitude is the digits after "0." -- send all four so the axis can reach
     // its real endpoints (two digits capped every axis at 0.99 and quantised to 1%).
@@ -2122,9 +2124,16 @@ function queueMove(axis, pos, int){
     // it the firmware reads "L05000I100R15000I100" as a single malformed L0 command and
     // silently drops every axis after the first.
     sendTCode(cmd + " ");
+    tickQueued = true;
 }
 
-function move(){ if(serialConnected){ sendTCode('\n'); } }
+// Ends the line of commands queued during this playback tick. Nothing queued, nothing
+// sent: the tick runs every 10 ms and an empty line would just be serial noise.
+var tickQueued = false;
+function move(){
+    if(serialConnected && tickQueued){ sendTCode('\n'); }
+    tickQueued = false;
+}
 
 // Binary search for the first keyframe strictly after ms. Returns acts.length when the
 // playhead is past the end. Used to re-seat an axis after any non-linear jump.
@@ -2232,8 +2241,17 @@ function startPlayerWatch(){
     waitForVideoPlayer();
 }
 
+// The watcher reschedules itself through here so there's only ever one pending tick.
+var watchTimer = null;
+function scheduleWatch(delay){
+    clearTimeout(watchTimer);
+    watchTimer = setTimeout(waitForVideoPlayer, delay);
+}
+function onPlayerPlay(){ scheduleWatch(0); } // back to the fast tick the moment playback starts
+
 function unbindPlayer(){
     if(!boundPlayer){ return; }
+    boundPlayer.removeEventListener("play", onPlayerPlay, false);
     boundPlayer.removeEventListener("seeking", resetIndex, false);
     boundPlayer.removeEventListener("seeked", resetIndex, false);
     boundPlayer.removeEventListener("ended", resetIndex, false);
@@ -2244,14 +2262,15 @@ function unbindPlayer(){
 function waitForVideoPlayer(){
     // Only the scene player counts: other pages (the scene wall, marker lists) have
     // preview <video>s of their own.
-    var player = isFinite(getSceneId())
-        ? (document.querySelector('#VideoJsPlayer_html5_api') || document.querySelector('video.vjs-tech') || document.querySelector('video'))
-        : null;
+    // While the bound player is still in the page, skip the DOM lookups.
+    var player = !isFinite(getSceneId()) ? null
+        : (boundPlayer && boundPlayer.isConnected) ? boundPlayer
+        : (document.querySelector('#VideoJsPlayer_html5_api') || document.querySelector('video.vjs-tech') || document.querySelector('video'));
     if(!player){
         // The element can disappear between scenes; drop the stale binding so the
         // replacement gets wired up instead of leaving listeners on a detached node.
         unbindPlayer();
-        setTimeout(waitForVideoPlayer, 500);
+        scheduleWatch(500);
         return;
     }
     // Compare identity, not a boolean. videoPlayerLoaded was set once and never
@@ -2260,6 +2279,7 @@ function waitForVideoPlayer(){
     // page navigation restored playback.
     if(boundPlayer !== player){
         unbindPlayer();
+        player.addEventListener("play", onPlayerPlay, false);
         player.addEventListener("seeking", resetIndex, false);
         // "seeking" doesn't fire in every path that moves the playhead (notably
         // resuming after the video ended), so also reset on completion.
@@ -2274,12 +2294,14 @@ function waitForVideoPlayer(){
         }
     }
     updateTime(player);
-    setTimeout(waitForVideoPlayer, 10);
+    // 10 ms ticks while playing; a paused player only needs checking a few times a second.
+    scheduleWatch(player.paused ? 250 : 10);
 }
 
 function processLimits(data){
     var values;
     var axesFound = [];
+    var learned = false;
     console.log(`[TCode] Device returned limits:`, data);
     // Was data.length-1, which silently discarded the last axis reported by D2 when the
     // reply had no trailing blank line (the plain-text path filters blanks out already).
@@ -2295,8 +2317,11 @@ function processLimits(data){
                 console.log(`[TCode] Set ${values[0]} limits: ${values[1]} - ${values[2]}`);
             }
 
-            // Auto-enable axes that the device supports (L and R axes only, not V or A)
-            if(/^[LR]\d+$/.test(values[0]) && settings.axes[values[0]]){
+            // Auto-enable an L/R axis the first time a device reports it. After that the
+            // user's on/off choice stands: switching an axis off must survive reconnects.
+            if(/^[LR]\d+$/.test(values[0]) && settings.axes[values[0]] && settings.knownAxes.indexOf(values[0]) === -1){
+                settings.knownAxes.push(values[0]);
+                learned = true;
                 if(!settings.axes[values[0]].enabled){
                     settings.axes[values[0]].enabled = true;
                     axesFound.push(values[0]);
@@ -2307,8 +2332,8 @@ function processLimits(data){
     }
     if(axesFound.length > 0){
         showToast("Axes Auto-Enabled", "Enabled " + axesFound.join(", ") + " based on device capabilities", "info");
-        saveSettings();
     }
+    if(learned){ saveSettings(); }
     refreshSettingsTab('axes');
 }
 
@@ -2384,7 +2409,7 @@ function setLimits(min, max, axis="L0", save=true){
 }
 
 function init(){
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => initAxis(ax));
+    AXIS_LIST.forEach(ax => initAxis(ax));
     loadCurrentLimits();
 }
 
@@ -2405,7 +2430,7 @@ function mainAttempt(token){
         // device D2 reply) can call setLimits and trigger a save.
         // Doing this on a timer previously let startup write the fallback [0,9999] over
         // the user's real saved range.
-        ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
+        AXIS_LIST.forEach(ax => {
             if(!AXIS[ax]){ return; }
             if(settings.axes[ax] && settings.axes[ax].limits){
                 // User-saved range wins over device defaults
@@ -2421,13 +2446,13 @@ function mainAttempt(token){
         limitsReady = true;
 
         loadCurrentLimits(); // ask the device; processLimits() keeps saved ranges over device defaults
-        ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
+        AXIS_LIST.forEach(ax => {
             if(settings.axes[ax] && settings.axes[ax].limits){ limits2socket(ax); } // push saved range to device
         });
 
         // Automatic homing is opt-out; the Home Now button ignores this and always runs.
         if(settings.homeEnabled !== false){
-            ["L0","L1","L2","R0","R1","R2"].forEach(ax => centerAxis(ax));
+            AXIS_LIST.forEach(ax => centerAxis(ax));
         }
         fetchSceneInfo(getSceneId());
     }else{ setTimeout(function(){ mainAttempt(token); }, 500); }

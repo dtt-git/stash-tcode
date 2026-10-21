@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const src = fs.readFileSync(path.join(__dirname, '..', 'stash-tcode.user.js'), 'utf8');
 const start = src.indexOf('// --- HR GOVERNOR ---');
-const end = src.indexOf('function listAxes(');
+const end = src.indexOf('function clamp9999('); // first function after the speed-limit section
 const section = src.slice(start, end);
 
 // Minimal stand-ins for the script globals the section touches.

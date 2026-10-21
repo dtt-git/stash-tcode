@@ -38,12 +38,13 @@ check('RR flag set but no room for any', m.rr === 0, m);
 check('truncated uint16 is null', api.parse(dv([0x01, 0x2c])) === null);
 check('too short is null', api.parse(dv([0x00])) === null);
 
-// --- is it a real reading? ---
+// --- is it a real reading? (second arg: has this sensor timed beats consistently?) ---
 check('normal reading counts', api.verdict({ bpm: 80, contact: true, rr: 1 }, true) === 'ok');
 check('below 35 BPM is not a pulse', api.verdict({ bpm: 20, contact: null, rr: 0 }, false) === 'low');
 check('sensor reports no skin contact', api.verdict({ bpm: 80, contact: false, rr: 1 }, true) === 'contact');
-check('strap stopped timing beats (taken off, repeating last BPM)', api.verdict({ bpm: 80, contact: null, rr: 0 }, true) === 'beats');
-check('sensor that never times beats still counts', api.verdict({ bpm: 80, contact: null, rr: 0 }, false) === 'ok');
+check('no contact flag, beat timing stopped (taken off, repeating last BPM)', api.verdict({ bpm: 80, contact: null, rr: 0 }, true) === 'beats');
+check('sensor with a contact flag is not judged by beat timing', api.verdict({ bpm: 80, contact: true, rr: 0 }, true) === 'ok');
+check('beat timing not yet consistent: missing RR still counts', api.verdict({ bpm: 80, contact: null, rr: 0 }, false) === 'ok');
 
 console.log(fails ? fails + ' FAILED' : 'all passed');
 process.exit(fails ? 1 : 0);
