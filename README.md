@@ -51,7 +51,8 @@ its heart rate. Then turn it on under **Heart Rate**.
   default), to counter fatigue over a long session. It never raises the ceiling above what you typed.
 - **Signal timeout:** if a connected monitor sends nothing for 8 s, the device stops. With no monitor
   connected at all, scripts play normally.
-- **Session** shows the live state, and **Reset** clears the edge count and decay.
+- **Session** shows the live state, and **Reset** clears the edge count and decay. The session
+  survives a page reload but ends when you close the tab.
 
 Chrome only reconnects a Bluetooth monitor after a refresh if
 `chrome://flags/#enable-web-bluetooth-new-permissions-backend` is on. Without it, the Device tab

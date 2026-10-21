@@ -1710,7 +1710,11 @@ function fetchFunscript(axis, force=false){
 var EDGE_RELEASE_BPM = 5;   // hysteresis: an edge only clears this far below the ceiling
 var REJOIN_START = 0.16;    // allowance at the moment an edge clears
 
-var hrSession = { edged: false, edges: 0, releasedAt: null };
+// The session (edge count, which drives decay; whether we're at the edge; when the last
+// edge cleared) is kept in sessionStorage: it survives a page reload, say when another
+// plugin misbehaves, but not closing the tab, which is what ends a session.
+var HR_SESSION_KEY = 'stash-tcode:hrSession';
+var hrSession = loadHrSession();
 var climaxMarksMs = [];     // climax mark times for the current scene (scene ms)
 var lastGov = null;         // most recent governor result, for the UI
 
@@ -1762,6 +1766,21 @@ function climaxFactor(sceneMs, marks, rampMs, holdMs, easeMs){
     return Math.max(0, Math.min(1, k));
 }
 
+function loadHrSession(){
+    try {
+        var saved = JSON.parse(window.sessionStorage.getItem(HR_SESSION_KEY) || 'null');
+        if(saved && typeof saved.edges === 'number'){
+            return { edged: !!saved.edged, edges: Math.max(0, Math.floor(saved.edges)),
+                     releasedAt: typeof saved.releasedAt === 'number' ? saved.releasedAt : null };
+        }
+    } catch(e) {} // unavailable or corrupt: start fresh
+    return { edged: false, edges: 0, releasedAt: null };
+}
+
+function saveHrSession(){
+    try { window.sessionStorage.setItem(HR_SESSION_KEY, JSON.stringify(hrSession)); } catch(e) {}
+}
+
 // Advance the edge state machine for one reading. Rising through the ceiling counts an
 // edge (but not while a climax mark has taken over); it clears below the release band.
 function updateEdgeState(session, bpm, ceiling, climaxActive, now){
@@ -1803,6 +1822,7 @@ function computeAllowance(now, sceneMs){
     }
 
     var event = updateEdgeState(hrSession, hr.bpm, wc.ceiling, res.climax > 0, now);
+    if(event){ saveHrSession(); }
     if(event === 'edge'){ onEdge(); }
 
     var base;
@@ -1818,8 +1838,9 @@ function computeAllowance(now, sceneMs){
             base = r;
             res.phase = 'REJOINING';
             res.label = 'REJOINING ' + Math.max(1, Math.ceil(cfg.rejoinSec - since)) + ' s';
-        }else if(r >= 1){
+        }else if(r >= 1 && hrSession.releasedAt != null){
             hrSession.releasedAt = null; // ramp finished
+            saveHrSession();
         }
         if(res.phase === 'EASING'){ res.label = 'EASING ' + Math.round(base * 100) + '%'; }
         if(res.phase === 'FREE'){ res.label = 'FREE'; }
@@ -1852,6 +1873,7 @@ function resetHrSession(){
     hrSession.edged = false;
     hrSession.edges = 0;
     hrSession.releasedAt = null;
+    saveHrSession();
     refreshGovernor();
 }
 
