@@ -53,6 +53,11 @@ Web Serial and Web Bluetooth only work in Chromium-based browsers (Chrome, Edge)
 secure origin. If you reach Stash by a LAN hostname over plain HTTP, add that origin under
 `chrome://flags/#unsafely-treat-insecure-origin-as-secure` or serve Stash over HTTPS.
 
+The **Stash Interactive Tools** plugin is optional. Without it, the script plays each scene's main
+funscript, single- or multi-axis, which Stash serves itself. You need the plugin only for separate
+per-axis files (`video.twist.funscript`, `video.roll.funscript`, ...), which Stash doesn't serve on its
+own, and for picking between several scripts for one scene.
+
 Upgrading from 0.5.x "Stash-TCode (USB Fix)": the name changed, so Tampermonkey installs this as a
 new script with fresh settings. Set your ranges again and delete the old script.
 
