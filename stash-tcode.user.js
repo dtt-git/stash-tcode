@@ -117,7 +117,7 @@ function loadSettings(){
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
                            "hr": { deviceId: null, deviceName: null, enabled: false,
-                                   restingHr: 70, climaxHr: 140, band: 10, floor: 30, rejoinSec: 8, timeoutSec: 8,
+                                   climaxHr: 140, band: 10, floor: 30, rejoinSec: 8, timeoutSec: 8,
                                    decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105,
                                    climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15, climaxTag: "Climax" },
                            "currentVersion": thisVersion};
@@ -127,6 +127,7 @@ function loadSettings(){
     // Drop settings for features that no longer exist (hotkeys, random motion).
     for(const gone of ["device", "initialKey", "minKey", "settingsKey", "syncKey"]){ delete settings[gone]; }
     for(const ax in settings.axes){ delete settings.axes[ax].random; }
+    delete settings.hr.restingHr;
     return settings;
 }
 
@@ -698,20 +699,9 @@ function buildHrTab(body){
         uiButton("Reset", "secondary", function(){ resetHrSession(); }, {small: true}));
     live.firstChild.appendChild(el('div', {class: 'sub-heading', id: 'tcode-gov-status', text: govStatusText(lastGov)}));
 
-    var rates = uiSection(body, "Heart rates");
-    var restInput, climaxInput;
-    restInput = uiNumber('restingHr', cfg.restingHr, {min: 30, max: 120, suffix: "BPM"}, function(v){
-        cfg.restingHr = v;
-        if(cfg.climaxHr < v + MIN_CEILING_GAP){ cfg.climaxHr = v + MIN_CEILING_GAP; climaxInput.querySelector('input').value = cfg.climaxHr; }
-        changed();
-    });
-    climaxInput = uiNumber('climaxHr', cfg.climaxHr, {min: 50, max: 250, suffix: "BPM"}, function(v){
-        cfg.climaxHr = Math.max(v, cfg.restingHr + MIN_CEILING_GAP);
-        climaxInput.querySelector('input').value = cfg.climaxHr;
-        changed();
-    });
-    uiSetting(rates, "Resting", "Your heart rate when relaxed.", restInput);
-    uiSetting(rates, "Climax", "The heart rate where you'd climax. This is the ceiling: strokes stop here. At least " + MIN_CEILING_GAP + " BPM above resting.", climaxInput);
+    var rates = uiSection(body, "Heart rate");
+    uiSetting(rates, "Climax", "The heart rate where you'd climax. This is the ceiling: strokes stop here.",
+        uiNumber('climaxHr', cfg.climaxHr, {min: 50, max: 250, suffix: "BPM"}, function(v){ cfg.climaxHr = v; changed(); }));
 
     var resp = uiSection(body, "Response");
     uiSetting(resp, "Approach band", "Strokes start shortening this many BPM below the ceiling. 0 only reacts at the ceiling.",
@@ -734,7 +724,7 @@ function buildHrTab(body){
         uiNumber('decayEvery', cfg.decayEvery, {min: 1, max: 10, suffix: "edges"}, function(v){ cfg.decayEvery = v; changed(); }), {sub: true}));
     decayRows.push(uiSetting(decay, "Drop by", "How much the ceiling falls each step.",
         uiNumber('decayBpm', cfg.decayBpm, {min: 1, max: 5, suffix: "BPM"}, function(v){ cfg.decayBpm = v; changed(); }), {sub: true}));
-    decayRows.push(uiSetting(decay, "Floor", "The ceiling never decays below this (or below resting + " + MIN_CEILING_GAP + ").",
+    decayRows.push(uiSetting(decay, "Floor", "The ceiling never decays below this.",
         uiNumber('decayFloor', cfg.decayFloor, {min: 80, max: 130, suffix: "BPM"}, function(v){ cfg.decayFloor = v; changed(); }), {sub: true}));
     decayRows.forEach(function(r){ r.classList.toggle('disabled', !cfg.decay); });
 }
@@ -1718,7 +1708,6 @@ function fetchFunscript(axis, force=false){
 // The pure functions below take everything as arguments so they can be tested alone.
 
 var EDGE_RELEASE_BPM = 5;   // hysteresis: an edge only clears this far below the ceiling
-var MIN_CEILING_GAP = 15;   // the ceiling never decays to within this of resting HR
 var REJOIN_START = 0.16;    // allowance at the moment an edge clears
 
 var hrSession = { edged: false, edges: 0, releasedAt: null };
@@ -1730,10 +1719,8 @@ var lastGov = null;         // most recent governor result, for the UI
 function workingCeiling(cfg, edges){
     var typed = cfg.climaxHr;
     if(!cfg.decay || !(edges > 0)){ return { ceiling: typed, decay: 0 }; }
-    var lowest = Math.min(typed, cfg.restingHr + MIN_CEILING_GAP);
     var drop = Math.floor(edges / Math.max(1, cfg.decayEvery)) * cfg.decayBpm;
-    var floor = Math.max(lowest, cfg.decayFloor);
-    var ceiling = Math.min(typed, Math.max(floor, typed - drop));
+    var ceiling = Math.min(typed, Math.max(cfg.decayFloor, typed - drop));
     return { ceiling: ceiling, decay: typed - ceiling };
 }
 
