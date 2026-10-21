@@ -20,6 +20,22 @@ Maintained by **dtt**. Originally based on Stash-TCode by Steel, with modificati
 - A stats overlay on the video: heart rate, ceiling, edges and what the limiter is doing.
 - Handles seeking, including on transcoded streams.
 
+## Screenshots
+
+<p>
+  <img src="docs/screenshots/settings-heart-rate.png" alt="The Heart Rate tab of the settings dialog" width="49%">
+  <img src="docs/screenshots/settings-axes.png" alt="The Axes tab of the settings dialog" width="49%">
+</p>
+
+The stats overlay on the video, two edges in: the ceiling has decayed from 120 to 118 BPM and strokes
+are easing off at 72%. The navbar button shows the device status and live heart rate.
+
+<p>
+  <img src="docs/screenshots/overlay.png" alt="Stats overlay: 112 BPM, ceiling 118 (−2), easing 72%, 2 edges" width="300">
+  <br>
+  <img src="docs/screenshots/navbar.png" alt="Navbar button showing Connected and a heart rate of 112" width="360">
+</p>
+
 ## Install
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
@@ -41,8 +57,8 @@ Connect a monitor under **Device → Heart rate monitor**. Any monitor with the 
 heart-rate service works: chest straps (Polar, Coospo, Garmin, Wahoo, ...) or a watch broadcasting
 its heart rate. Then turn it on under **Heart Rate**.
 
-- **Edge** is the heart rate that counts as an edge, and it's your ceiling. In the **approach band** below it (default 10 BPM), strokes shorten
-  linearly down to the **shortest stroke** (default 30%). The stroke shortens from the bottom of its
+- **Edge** is the heart rate that counts as an edge, and it's your ceiling. In the **approach band**
+  below it (default 10 BPM), strokes shorten linearly down to the **shortest stroke** (default 30%). The stroke shortens from the bottom of its
   range; other axes shrink toward their home position.
 - **At the ceiling** the stroker parks at the bottom of its range and sits out the script while the
   video keeps playing. Once your heart rate drops 5 BPM below the ceiling, strokes ramp back in over

@@ -699,7 +699,7 @@ function buildHrTab(body){
     var changed = function(){ saveSettings(); refreshGovernor(); };
 
     var main = uiSection(body, "Heart-rate modulation",
-        "Shortens strokes as your heart rate nears your climax rate, and holds the stroker at the edge until you recover.");
+        "Shortens strokes as your heart rate nears your edge, and holds the stroker back there until you recover.");
     uiSetting(main, "Enable", hr.status === 'off' ? "Connect a monitor on the Device tab. Without one, scripts play normally." : null,
         uiSwitch('hrEnabled', cfg.enabled, function(v){ cfg.enabled = v; changed(); }));
     var live = uiSetting(main, "Session", null,
