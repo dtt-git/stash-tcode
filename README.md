@@ -46,8 +46,23 @@ are easing off at 72%. The navbar button shows the device status and live heart 
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
 2. Open **[stash-tcode.user.js (raw)](https://raw.githubusercontent.com/dtt-git/stash-tcode/main/stash-tcode.user.js)**.
    Tampermonkey shows its install page; click **Install**. It then checks this repo for updates automatically.
-3. Open Stash (it should be on port 9999). Click **Connect** in the navbar, then pick your device's serial port.
+3. Open Stash. Click **Connect** in the navbar, then pick your device's serial port.
    After that first time it reconnects by itself.
+
+### Stash on another address
+
+Out of the box the script runs on any address with Stash's default port, `:9999`
+(`http://localhost:9999`, `http://192.168.1.20:9999`, ...). If you reach Stash some other way, such as
+a reverse proxy (`https://stash.example.com`) or a different port, add that address to the script in
+Tampermonkey:
+
+1. Open the Tampermonkey **Dashboard** and click **Stash-TCode**.
+2. Go to its **Settings** tab and find **Includes/Excludes**.
+3. Under **User includes**, add your address followed by `/*`, e.g. `https://stash.example.com/*`
+   (one per line), and save.
+
+User includes are kept when the script updates. Leave **Original includes** ticked if you also use
+port 9999.
 
 Web Serial and Web Bluetooth only work in Chromium-based browsers (Chrome, Edge) and only on a
 secure origin. If you reach Stash by a LAN hostname over plain HTTP, add that origin under
@@ -130,6 +145,7 @@ serial port selection, are covered by plain Node tests:
 node tests/governor.test.js
 node tests/hr-packets.test.js
 node tests/serial.test.js
+node tests/include.test.js
 ```
 
 ### Releasing

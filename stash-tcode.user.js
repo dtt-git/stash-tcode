@@ -4,8 +4,7 @@
 // @version      0.6.0
 // @description  Drive TCode devices from Stash over USB Web Serial, with optional heart-rate modulation
 // @author       dtt (originally by Steel, modded by Spunkle)
-// @include      http*://*:9999*
-// @grant        GM_xmlhttpRequest
+// @include      /^https?:\/\/[^\/?#]+:9999\//
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_info
@@ -36,6 +35,7 @@ var bufferTimeout = null;
 // ------------------------
 
 var scriptList = null;
+var scriptListRequest = null;   // the in-flight Interactive Tools lookup, shared by all axes
 var AXIS = new Object();
 var pending = false;
 var msPending = false;
@@ -1438,6 +1438,33 @@ function startHud(){
 
 // ---------------------------------
 
+// --- STASH REQUESTS ---
+// Everything the script downloads comes from the Stash server this page belongs to, as a
+// plain same-origin fetch: the browser attaches Stash's session cookie when it has a
+// login, and no cross-site request permission is needed.
+
+// `url` resolved against the page, or null when it points at another site. Script URLs
+// can come from the page itself (the Interactive Tools dropdown), so never follow one
+// off-site with the user's cookies.
+function sameOriginUrl(url){
+    try {
+        var u = new URL(url, location.href);
+        return u.origin === location.origin ? u.href : null;
+    } catch(e) { return null; }
+}
+
+// GET a text file from Stash; resolves {status, response} (the body text).
+function getStashText(url){
+    return fetch(url, { credentials: 'same-origin' }).then(function(r){
+        return r.text().then(function(t){ return { status: r.status, response: t }; });
+    });
+}
+
+// Stash's own address for the scene's main funscript.
+function defaultFunscriptUrl(){
+    return location.origin + '/scene/' + getSceneId() + '/funscript';
+}
+
 // --- STASH GRAPHQL ---
 // A plain same-origin fetch: the browser attaches Stash's session cookie, which is
 // HttpOnly (invisible to document.cookie), so this also works when Stash has a login.
@@ -1659,18 +1686,9 @@ function parseMultiAxisFunscript(json) {
 // Fetch the main funscript file first, then check if it's multi-axis
 function fetchMainFunscript() {
     var chosenScript = document.querySelector('#stash-interactive-tools-select-funscripts');
-    var url = "";
+    var url = (chosenScript && sameOriginUrl(chosenScript.value)) || defaultFunscriptUrl();
 
-    if (chosenScript) {
-        url = chosenScript.value;
-    } else {
-        url = location.protocol + '//' + location.host + '/scene/' + getSceneId() + '/funscript';
-    }
-
-    GM_xmlhttpRequest({
-        method: "GET",
-        url: url,
-        onload: function(response) {
+    getStashText(url).then(function(response) {
             if (response.status == 200) {
                 try {
                     var json = JSON.parse(response.response);
@@ -1718,8 +1736,7 @@ function fetchMainFunscript() {
 
             // Clean up dropdown options
             if (chosenScript) { cleanUpOptions(chosenScript); }
-        }
-    });
+    }).catch(function(e) { console.error("[TCode] Couldn't load the funscript:", e); });
 }
 
 // Fallback: fetch individual axis files
@@ -1733,41 +1750,47 @@ function fetchIndividualAxisFiles() {
 
 function fetchFunscript(axis, force=false){
     if(scriptList == null){
-        // Ask the Stash Interactive Tools plugin for the scene's script list. Without the
-        // plugin (or if it fails) carry on with an empty list and try the default paths.
-        stashGql("mutation($plugin_id: ID!, $args: Map){ runPluginOperation(plugin_id: $plugin_id, args: $args) }",
-                 { plugin_id: "StashInteractiveTools", args: { mode: "init", scene_id: String(getSceneId()), origin: location.origin } })
-            .then(function(data){ scriptList = (data.runPluginOperation && data.runPluginOperation.scripts) || []; })
-            .catch(function(e){ debug("[TCode] StashInteractiveTools unavailable: " + e.message); scriptList = []; })
-            .then(function(){ fetchFunscript(axis); });
+        // Ask the Stash Interactive Tools plugin for the scene's script list, once: every
+        // axis lands here before the first answer, and each plugin call can start a process
+        // on the server. Without the plugin (or if it fails) carry on with an empty list and
+        // try the default paths.
+        if(!scriptListRequest){
+            scriptListRequest = stashGql("mutation($plugin_id: ID!, $args: Map){ runPluginOperation(plugin_id: $plugin_id, args: $args) }",
+                     { plugin_id: "StashInteractiveTools", args: { mode: "init", scene_id: String(getSceneId()), origin: location.origin } })
+                .then(function(data){ scriptList = (data.runPluginOperation && data.runPluginOperation.scripts) || []; })
+                .catch(function(e){ debug("[TCode] StashInteractiveTools unavailable: " + e.message); scriptList = []; })
+                .then(function(){ scriptListRequest = null; });
+        }
+        scriptListRequest.then(function(){ fetchFunscript(axis); });
     }else{
         var chosenScript = document.querySelector('#stash-interactive-tools-select-funscripts');
         if(!chosenScript && !force){ setTimeout(function(){fetchFunscript(axis, true)}, 500); return -1; }
-        var url = "";
-        if(chosenScript){ url = chosenScript.value.split('.funscript')[0]; }
-        else{ url = location.protocol + '//' + location.host + '/scene/' + getSceneId() + '/funscript'; }
+        var chosen = chosenScript && sameOriginUrl(chosenScript.value);
+        var url = chosen ? chosen.split('.funscript')[0] : defaultFunscriptUrl();
 
         switch(axis){
             case "L1": url += ".surge"; break; case "L2": url += ".sway"; break; case "R0": url += ".twist"; break; case "R1": url += ".roll"; break; case "R2": url += ".pitch"; break;
         }
-        if(chosenScript){ url = url + ".funscript"; }
-        GM_xmlhttpRequest({
-            method: "GET", url: url,
-            onload: function(response){
-                if(response.status == 200){
-                    if(!AXIS[axis]){ AXIS[axis] = new Object(); }
-                    try { AXIS[axis].acts = JSON.parse(response.response).actions; }
-                    catch (error) { debug("JSON error"); }
-                    if(AXIS[axis].acts == null){ fetchFunscript(axis, force); return -1; }
-                    AXIS[axis].start = AXIS[axis].acts[0].at;
-                    AXIS[axis].end = AXIS[axis].acts[AXIS[axis].acts.length-1].at;
-                    showToast("Axis Loaded", axis + " with " + AXIS[axis].acts.length + " actions", "success", 3000);
-                }else{
-                    AXIS[axis].acts = null;
-                }
-                AXIS[axis].scriptLoaded = true;
+        if(chosen){ url = url + ".funscript"; }
+        getStashText(url).then(function(response){
+            if(!AXIS[axis]){ AXIS[axis] = new Object(); }
+            var acts = null;
+            if(response.status == 200){
+                try { acts = JSON.parse(response.response).actions; }
+                catch (error) { debug("[TCode] " + axis + " script isn't valid JSON"); }
             }
-        });
+            // No usable actions (missing file, or not a funscript): this axis has no script.
+            // Used to retry here forever when a 200 response held no actions.
+            if(Array.isArray(acts) && acts.length > 0){
+                AXIS[axis].acts = acts;
+                AXIS[axis].start = acts[0].at;
+                AXIS[axis].end = acts[acts.length-1].at;
+                showToast("Axis Loaded", axis + " with " + acts.length + " actions", "success", 3000);
+            }else{
+                AXIS[axis].acts = null;
+            }
+            AXIS[axis].scriptLoaded = true;
+        }).catch(function(e){ debug("[TCode] " + axis + " script request failed: " + e); });
     }
 }
 
