@@ -112,7 +112,7 @@ function saveSettings(){
 function loadSettings(){
     var thisVersion = GM_info.script.version;
     var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5,
-                                                  speedLimit: false, maxSpeed: 5}; };
+                                                  speedLimit: false, maxSpeed: 5, link: "", linkOverride: false}; };
     var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true, "knownAxes": [],
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
@@ -660,13 +660,31 @@ function buildAxisGroup(card, axis){
             function(lo, hi){ applyRange(lo, hi, true); }).el, {sub: true});
     uiSetting(group, "Invert", "Flip the direction of this axis.",
         uiSwitch('invert' + axis, cfg.invert, function(v){ cfg.invert = v; saveSettings(); }), {sub: true});
-    var freqRow;
-    uiSetting(group, "Auto motion", "When the scene has no script for this axis, move in a smooth sine wave instead.",
-        uiSwitch('auto' + axis, cfg.auto, function(v){ cfg.auto = v; freqRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
+    var autoRow, freqRow, overrideRow;
+    var linkSelect = el('select', {id: 'tcode-link' + axis, class: 'input-control form-control form-control-sm', style: 'width: 160px'},
+        [el('option', {value: '', text: 'Off'})].concat(AXIS_LIST.filter(function(o){ return o !== axis; }).map(function(o){
+            return el('option', {value: o, text: o + ' · ' + AXIS_NAMES[o]});
+        })));
+    linkSelect.value = cfg.link || '';
+    linkSelect.addEventListener('change', function(){
+        cfg.link = linkSelect.value;
+        overrideRow.classList.toggle('disabled', !cfg.link);
+        autoRow.classList.toggle('disabled', !!cfg.link);
+        freqRow.classList.toggle('disabled', !!cfg.link || !cfg.auto);
+        saveSettings();
+    });
+    uiSetting(group, "Follow", "Copy another axis's motion: this axis moves to the same point in its own range. Applies when the scene has no script for this axis.",
+        linkSelect, {sub: true});
+    overrideRow = uiSetting(group, "Override script", "Follow even when the scene has a script for this axis, ignoring that script.",
+        uiSwitch('linkOverride' + axis, cfg.linkOverride, function(v){ cfg.linkOverride = v; saveSettings(); }),
+        {sub: true, disabled: !cfg.link});
+    autoRow = uiSetting(group, "Auto motion", "When the scene has no script for this axis, move in a smooth sine wave instead.",
+        uiSwitch('auto' + axis, cfg.auto, function(v){ cfg.auto = v; freqRow.classList.toggle('disabled', !v || !!cfg.link); saveSettings(); }),
+        {sub: true, disabled: !!cfg.link});
     var hzFormat = function(v){ return v.toFixed(2) + " Hz · " + Math.round(v * 60) + "/min"; };
     freqRow = uiSetting(group, "Frequency", "Full cycles per second.",
         uiRange('autoHz' + axis, cfg.autoHz, {min: AUTO_HZ_MIN, max: AUTO_HZ_MAX, step: 0.05, format: hzFormat}, null,
-                function(v){ cfg.autoHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.auto});
+                function(v){ cfg.autoHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.auto || !!cfg.link});
     var speedRow;
     uiSetting(group, "Speed limit", "Cap how fast this axis moves. Faster moves are shortened so they stay in sync with the video.",
         uiSwitch('speedLimit' + axis, cfg.speedLimit, function(v){ cfg.speedLimit = v; speedRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
@@ -2035,11 +2053,47 @@ function autoMotion(axis, ms, jumped, a){
     if(!fresh && ms < ax.sineDue){ return; }
     var interval = fresh ? SINE_REJOIN_MS : SINE_STEP_MS;
     ax.sineDue = ms + interval;
-    var pos = sinePosition(settings.axes[axis].autoHz, ms + interval, AXIS_LIST.indexOf(axis));
-    if(settings.axes[axis].invert){ pos = 100 - pos; }
-    pos = shapePosition(axis, pos, a);
-    var lo = parseInt(ax.limits[0]), hi = parseInt(ax.limits[1]);
-    queueMove(axis, Math.round((pos / 100) * (hi - lo) + lo), interval);
+    emitAxisMove(axis, sinePosition(settings.axes[axis].autoHz, ms + interval, AXIS_LIST.indexOf(axis)), interval, a);
+}
+
+// --- LINKED AXES ---
+// An axis set to follow another copies the moves that axis makes: whenever the source
+// heads to a script position (0-100) over some time, the follower heads to the same
+// position within its own range over the same time. The source's raw position is used
+// (before its invert), so the follower's own range and invert decide how it moves.
+// Precedence on an axis: its own script, then following, then auto motion; with
+// "Override script" on, following wins over the axis's own script too.
+
+var tickMoves = {};   // axis -> {pos, int}: raw positions sent during this playback tick
+
+// Send one move for an axis from a raw script position: invert, heart-rate shaping and
+// the axis range, then queue it. Records the raw position for any axis following it.
+function emitAxisMove(axis, rawPos, int, a){
+    var pos = settings.axes[axis].invert ? 100 - rawPos : rawPos;
+    pos = shapePosition(axis, pos, a); // heart-rate modulation (a = 1 when off)
+    // Map 0-100 onto the axis range in device units (0-9999).
+    var lo = parseInt(AXIS[axis].limits[0]), hi = parseInt(AXIS[axis].limits[1]);
+    queueMove(axis, Math.round((pos / 100) * (hi - lo) + lo), int);
+    tickMoves[axis] = { pos: rawPos, int: int };
+}
+
+// After the scripted and auto-motion moves of a tick: followers copy their source's move.
+// A few passes, so a chain (R1 follows R0 follows L0) resolves within the same tick; a
+// loop (A follows B follows A) simply never moves.
+function emitLinkedMoves(a){
+    for(var pass = 0; pass < AXIS_LIST.length; pass++){
+        var progressed = false;
+        AXIS_LIST.forEach(function(axis){
+            var cfg = settings.axes[axis];
+            var src = cfg && cfg.link;
+            if(!src || src === axis || !cfg.enabled || !AXIS[axis] || AXIS[axis].limits == null){ return; }
+            if(AXIS[axis].acts != null && !cfg.linkOverride){ return; } // its own script wins, unless overridden
+            if(tickMoves[axis] || !tickMoves[src]){ return; }
+            emitAxisMove(axis, tickMoves[src].pos, tickMoves[src].int, a);
+            progressed = true;
+        });
+        if(!progressed){ break; }
+    }
 }
 
 // ---------------------------------
@@ -2180,13 +2234,17 @@ function currentAction(ms){
         var jumped = (lastActionMs === null) || (ms < lastActionMs) || (ms - lastActionMs > SEEK_THRESHOLD_MS);
         lastActionMs = ms;
         var gov = lastGov = computeAllowance(Date.now(), ms);
+        tickMoves = {};
         for(var x in AXIS){
             if(!settings.axes[x].enabled || AXIS[x].limits == null){ continue; }
             if(AXIS[x].acts == null){
-                // No script for this axis in this scene: auto motion fills in, if it's on.
-                if(settings.axes[x].auto){ autoMotion(x, ms, jumped, gov.a); }
+                // No script for this axis in this scene: it follows another axis if linked
+                // (emitLinkedMoves, below), otherwise auto motion fills in if it's on.
+                if(!settings.axes[x].link && settings.axes[x].auto){ autoMotion(x, ms, jumped, gov.a); }
                 continue;
             }
+            // Following with "Override script": ignore this axis's own script entirely.
+            if(settings.axes[x].link && settings.axes[x].linkOverride){ continue; }
             if(jumped){ AXIS[x].index = seekIndex(AXIS[x].acts, ms); }
             // Re-seat rather than give up when the index has run off the end (video
             // ended, or a seek left it stranded). The old guard skipped the whole
@@ -2199,19 +2257,14 @@ function currentAction(ms){
             if(AXIS[x].index == 0 || (prev && prev.at < ms)){
                 for(var i=AXIS[x].index;i<AXIS[x].acts.length;i++){
                     if(AXIS[x].acts[i] && AXIS[x].acts[i].at > ms){
-                        var pos = AXIS[x].acts[i].pos;
-                        if (settings.axes[x].invert) { pos = 100 - pos; }
-                        pos = shapePosition(x, pos, gov.a); // heart-rate modulation (a = 1 when off)
-                        // Map funscript 0-100 straight onto the axis range in device units
-                        // (0-9999). The old "/100" collapsed this to 0-99 before sending.
-                        var act = Math.round(((pos/100) * (AXIS[x].limits[1] - AXIS[x].limits[0])) + parseInt(AXIS[x].limits[0]));
-                        queueMove(x, act, (AXIS[x].acts[i].at - ms));
+                        emitAxisMove(x, AXIS[x].acts[i].pos, AXIS[x].acts[i].at - ms, gov.a);
                         AXIS[x].index = ++i;
                         break;
                     }
                 }
             }
         }
+        emitLinkedMoves(gov.a);
         move();
     }catch(e){
         // Without this, a throw left msPending stuck true and every later call
