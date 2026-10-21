@@ -50,7 +50,6 @@ var limitsReady = false; // true once saved ranges are restored; gates persisten
 const BOTH = 0;
 const LOWER = 1;
 const UPPER = 2;
-const isChrome = !!unsafeWindow.chrome;
 
 function isNewerVersion (oldVer, newVer) {
     const oldParts = oldVer.split('.')
@@ -105,74 +104,7 @@ function persistLimitsSoon(){
     }, 300);
 }
 
-function settingsMenuApplySaved(){
-    for(const setting in settings){
-        if(setting == "axes"){
-            for (const axis in settings.axes){
-                var axisCheck = document.querySelector('#enable' + axis);
-                if(axisCheck && settings.axes[axis].enabled){
-                    axisCheck.checked = true;
-                    var group = axisCheck.closest('.control-group');
-                    var parentContainer = group ? group.querySelector('.dual-slider-container') : null;
-                    if(parentContainer){ parentContainer.classList.remove('disabled'); }
-                    var homeRow = group ? group.querySelector('.control-row-secondary') : null;
-                    if(homeRow){ homeRow.classList.remove('disabled'); }
-                }
-                var invertCheck = document.querySelector('#invert' + axis);
-                if(invertCheck && settings.axes[axis].invert){ invertCheck.checked = true; }
-                var autoCenterCheck = document.querySelector('#autoCenter' + axis);
-                if(autoCenterCheck){ autoCenterCheck.checked = (settings.axes[axis].autoCenter !== false); }
-            }
-            continue;
-        }
-        var input = document.querySelector('#' + setting);
-        if(input){
-            if(input.type == "checkbox"){
-                if(JSON.parse(settings[setting])){ input.checked = true; }
-            }else if(input.type == "text" || input.type == "range"){
-                input.value = settings[setting];
-            }
-        }
-    }
-}
-
-function saveSettings(saveToDevice=true){
-    for(const setting in settings){
-        if(setting == "axes"){
-            for (const axis in settings.axes){
-                var axisCheck = document.querySelector('#enable' + axis);
-                if(axisCheck){ settings.axes[axis].enabled = axisCheck.checked; }
-                var invertCheck = document.querySelector('#invert' + axis);
-                if(invertCheck){ settings.axes[axis].invert = invertCheck.checked; }
-                var autoCenterCheck = document.querySelector('#autoCenter' + axis);
-                if(autoCenterCheck){ settings.axes[axis].autoCenter = autoCenterCheck.checked; }
-                var centerInput = document.querySelector('#center' + axis);
-                if(centerInput && autoCenterCheck && !autoCenterCheck.checked){
-                    settings.axes[axis].center = parseInt(centerInput.value);
-                }
-                // Persist the axis range so it survives refreshes.
-                if(AXIS[axis] && AXIS[axis].limits != null){
-                    settings.axes[axis].limits = [AXIS[axis].limits[0], AXIS[axis].limits[1]];
-                }
-            }
-            continue;
-        }
-        var input = document.querySelector('#' + setting);
-        if(input){
-            if(input.type == "checkbox"){
-                if(input.checked){ settings[setting] = true; }else{ settings[setting] = false; }
-            }else if(input.type == "text" || input.type == "range"){
-                settings[setting] = input.value;
-            }
-        }
-    }
-    if(saveToDevice){
-        for(const axis of listAxes()){
-            var min = document.querySelector('#min' + axis);
-            var max = document.querySelector('#max' + axis);
-            if(min && max){ setLimits(min.value, max.value, axis); }
-        }
-    }
+function saveSettings(){
     GM_setValue("settings", settings);
     publishDebugApi();
 }
@@ -208,349 +140,237 @@ function backfillDefaults(target, defaults){
     }
 }
 
-// --- TOAST NOTIFICATION SYSTEM ---
-var toastContainer = null;
-var toastQueue = [];
-var toastActive = false;
+// --- UI TOOLKIT ---
+// Everything is built from Stash's own markup (Bootstrap 4 + its .setting-section/.setting
+// rows), so it picks up Stash's theme, including any custom CSS the user has installed.
+// The stylesheet below only covers layout details and the range sliders, which Stash
+// doesn't style.
 
-function initToastContainer() {
-    if (toastContainer) return;
-    toastContainer = document.createElement('div');
-    toastContainer.id = 'tcode-toast-container';
-    toastContainer.style.cssText = `
-        position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-        z-index: 999999; display: flex; flex-direction: column-reverse; gap: 8px;
-        pointer-events: none; max-width: 90%; width: 400px;
-    `;
-    document.body.appendChild(toastContainer);
+var STASH = { bg: "#202b33", card: "#30404d", input: "#394b59", accent: "#137cbd", text: "#f5f8fa",
+              muted: "#bfccd6", success: "#0f9960", warning: "#d9822b", danger: "#db3737" };
 
-    // Add toast styles
-    var toastStyles = document.createElement('style');
-    toastStyles.id = 'tcode-toast-styles';
-    toastStyles.textContent = `
-        .tcode-toast {
-            background: linear-gradient(135deg, rgba(26, 26, 46, 0.95) 0%, rgba(22, 33, 62, 0.95) 100%);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            padding: 14px 20px;
-            color: #fff;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            font-size: 14px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            animation: toastSlideIn 0.3s ease-out;
-            pointer-events: auto;
-        }
-        .tcode-toast.toast-success { border-left: 4px solid #4ade80; }
-        .tcode-toast.toast-info { border-left: 4px solid #60a5fa; }
-        .tcode-toast.toast-warning { border-left: 4px solid #fbbf24; }
-        .tcode-toast.toast-error { border-left: 4px solid #f87171; }
-        .tcode-toast .toast-icon {
-            font-size: 1.4em;
-            flex-shrink: 0;
-        }
-        .tcode-toast .toast-content {
-            flex: 1;
-        }
-        .tcode-toast .toast-title {
-            font-weight: 600;
-            margin-bottom: 2px;
-        }
-        .tcode-toast .toast-message {
-            opacity: 0.8;
-            font-size: 0.9em;
-        }
-        .tcode-toast.toast-exit {
-            animation: toastSlideOut 0.3s ease-in forwards;
-        }
-        @keyframes toastSlideIn {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes toastSlideOut {
-            from { opacity: 1; transform: translateY(0); }
-            to { opacity: 0; transform: translateY(-20px); }
-        }
-    `;
-    document.head.appendChild(toastStyles);
+function injectUiStyles(){
+    if(document.getElementById('tcode-ui-styles')){ return; }
+    var s = document.createElement('style');
+    s.id = 'tcode-ui-styles';
+    s.textContent = `
+#tcode-modal .modal-header { align-items: center; }
+#tcode-modal .modal-title { display: flex; align-items: center; gap: .5rem; }
+#tcode-modal .modal-body { padding-top: .5rem; }
+#tcode-modal .nav-tabs { margin: 0 0 1rem; }
+#tcode-modal .nav-tabs .nav-link { cursor: pointer; }
+#tcode-modal .setting-section h1 { font-size: 1.1rem; margin-bottom: .25rem; }
+#tcode-modal .setting-section > .sub-heading { color: ${STASH.muted}; margin: 0 0 .5rem; }
+#tcode-modal .setting-section:not(:first-child) { margin-top: 1.25rem; }
+#tcode-modal .setting { gap: 1rem; padding: 12px 15px; }
+#tcode-modal .setting > div:first-child { flex: 1 1 auto; min-width: 0; }
+#tcode-modal .setting > div:last-child { flex: 0 0 auto; min-width: 0; }
+#tcode-modal .setting h3 { font-size: 1rem; }
+#tcode-modal .setting .sub-heading { color: ${STASH.muted}; margin-top: .25rem; }
+#tcode-modal .setting.sub-setting { padding-left: 2rem; }
+#tcode-modal .setting.disabled > div:last-child { opacity: .5; pointer-events: none; }
+#tcode-modal .setting-group { padding-bottom: 0; }
+#tcode-modal .setting-group:not(:last-child) { border-bottom: 1px solid #000; }
+#tcode-modal .setting-group > .setting { border-bottom: none; }
+#tcode-modal .setting-group.collapsed > .setting:not(:first-child) { display: none; }
+#tcode-modal .modal-footer { justify-content: space-between; }
+#tcode-modal .tcode-version { color: ${STASH.muted}; font-size: .8rem; }
+#tcode-modal .tcode-number { width: 90px; text-align: right; display: inline-block; }
+#tcode-modal .tcode-suffix { margin-left: .4rem; color: ${STASH.muted}; }
+#tcode-modal .tcode-status { display: inline-flex; align-items: center; gap: .4rem; }
+#tcode-modal .tcode-dot { width: 8px; height: 8px; border-radius: 50%; background: ${STASH.danger}; display: inline-block; }
+#tcode-modal .tcode-dot.on { background: ${STASH.success}; }
+#tcode-modal .tcode-list { margin: .25rem 0 0; padding-left: 1.1rem; color: ${STASH.muted}; }
+
+/* Range sliders: thin track in the input colour, accent fill, light thumb. */
+.tcode-range { display: flex; align-items: center; gap: .6rem; width: 280px; max-width: 100%; }
+.tcode-range .tcode-track { position: relative; flex: 1 1 auto; height: 20px; }
+.tcode-range input[type=range] {
+    -webkit-appearance: none; appearance: none; position: absolute; inset: 0; width: 100%; height: 20px;
+    margin: 0; background: transparent; outline: none; --lo: 0%; --hi: 0%;
+}
+.tcode-range input[type=range]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px;
+    background: linear-gradient(to right, ${STASH.input} 0 var(--lo), ${STASH.accent} var(--lo) var(--hi), ${STASH.input} var(--hi) 100%);
+}
+.tcode-range input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 50%;
+    background: ${STASH.text}; box-shadow: 0 0 0 1px rgba(16,22,26,.4), 0 1px 2px rgba(16,22,26,.4); cursor: pointer;
+}
+.tcode-range input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(19,124,189,.6); }
+.tcode-range input[type=range]:disabled::-webkit-slider-thumb { background: ${STASH.muted}; cursor: default; }
+.tcode-range.dual input[type=range] { pointer-events: none; }
+.tcode-range.dual input[type=range]::-webkit-slider-thumb { pointer-events: auto; }
+.tcode-range.dual input[type=range].upper::-webkit-slider-runnable-track { background: transparent; }
+.tcode-range output { min-width: 4.5em; text-align: right; font-variant-numeric: tabular-nums; color: ${STASH.text}; font-size: .9rem; }
+.tcode-range.dual output { min-width: 6.5em; }
+
+/* Toasts, in Stash's secondary colour with a coloured edge per type. */
+#tcode-toasts { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 1080;
+                display: flex; flex-direction: column-reverse; gap: .5rem; pointer-events: none; width: 360px; max-width: calc(100vw - 32px); }
+.tcode-toast { background: ${STASH.input}; color: ${STASH.text}; border-radius: 3.5px; border-left: 4px solid ${STASH.accent};
+               box-shadow: 0 2px 8px rgba(16,22,26,.5); padding: .5rem .75rem; font-size: .875rem;
+               transition: opacity .25s ease, transform .25s ease; }
+.tcode-toast.success { border-left-color: ${STASH.success}; }
+.tcode-toast.warning { border-left-color: ${STASH.warning}; }
+.tcode-toast.error { border-left-color: ${STASH.danger}; }
+.tcode-toast .tcode-toast-title { font-weight: 600; }
+.tcode-toast .tcode-toast-body { color: ${STASH.muted}; margin-top: .1rem; }
+.tcode-toast.hiding { opacity: 0; transform: translateY(-6px); }
+`;
+    document.head.appendChild(s);
 }
 
+// Tiny DOM builder. props: class, text, style (cssText), on<event> handlers; value,
+// checked and disabled are set as properties; anything else becomes an attribute.
+function el(tag, props, children){
+    var e = document.createElement(tag);
+    for(var k in (props || {})){
+        var v = props[k];
+        if(v == null || v === false && k !== 'value'){ continue; }
+        if(k === 'class'){ e.className = v; }
+        else if(k === 'text'){ e.textContent = v; }
+        else if(k === 'style'){ e.style.cssText = v; }
+        else if(k === 'value' || k === 'checked' || k === 'disabled'){ e[k] = v; }
+        else if(k.indexOf('on') === 0){ e.addEventListener(k.slice(2), v); }
+        else { e.setAttribute(k, v); }
+    }
+    for(var c of (children || [])){
+        if(c == null){ continue; }
+        e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    }
+    return e;
+}
+
+// A Stash settings section: heading, optional sub-heading, and the card rows go into.
+function uiSection(parent, title, subheading){
+    var card = el('div', {class: 'card'});
+    parent.appendChild(el('div', {class: 'setting-section'}, [
+        el('h1', {text: title}),
+        subheading ? el('div', {class: 'sub-heading', text: subheading}) : null,
+        card
+    ]));
+    return card;
+}
+
+// One Stash settings row: title and hint on the left, control on the right.
+function uiSetting(parent, title, hint, control, opts){
+    opts = opts || {};
+    var row = el('div', {class: 'setting' + (opts.sub ? ' sub-setting' : '') + (opts.disabled ? ' disabled' : '')}, [
+        el('div', null, [el('h3', {text: title}), hint ? el('div', {class: 'sub-heading', text: hint}) : null]),
+        el('div', null, [control])
+    ]);
+    parent.appendChild(row);
+    return row;
+}
+
+function uiSwitch(id, checked, onChange){
+    var input = el('input', {type: 'checkbox', id: 'tcode-' + id, class: 'custom-control-input', checked: !!checked,
+                             onchange: function(){ onChange(input.checked); }});
+    return el('div', {class: 'custom-control custom-switch'}, [input, el('label', {class: 'custom-control-label', for: 'tcode-' + id})]);
+}
+
+function uiButton(label, variant, onClick, opts){
+    opts = opts || {};
+    return el('button', {type: 'button', class: 'btn btn-' + (variant || 'secondary') + (opts.small ? ' btn-sm' : ''),
+                         text: label, disabled: !!opts.disabled, onclick: onClick});
+}
+
+// Number box. Out-of-range or empty input snaps back to the nearest valid value on change.
+function uiNumber(id, value, o, onChange){
+    var input = el('input', {type: 'number', id: 'tcode-' + id, class: 'form-control form-control-sm tcode-number',
+                             min: o.min, max: o.max, step: o.step || 1, value: value});
+    input.addEventListener('change', function(){
+        var v = parseFloat(input.value);
+        if(!isFinite(v)){ v = value; }
+        v = Math.min(o.max, Math.max(o.min, v));
+        input.value = v; value = v;
+        onChange(v);
+    });
+    return el('span', null, [input, o.suffix ? el('span', {class: 'tcode-suffix', text: o.suffix}) : null]);
+}
+
+function setRangeFill(input, loPct, hiPct){
+    input.style.setProperty('--lo', loPct + '%');
+    input.style.setProperty('--hi', hiPct + '%');
+}
+
+// Single slider with a readout. o: {min, max, step, format(v), origin}. The fill runs from
+// `origin` (default min) to the value. onInput fires while dragging, onChange on release.
+// Returns {el, set(v), setDisabled(bool)}.
+function uiRange(id, value, o, onInput, onChange){
+    var fmt = o.format || function(v){ return String(v); };
+    var input = el('input', {type: 'range', id: 'tcode-' + id, min: o.min, max: o.max, step: o.step || 1, value: value});
+    var out = el('output', {for: 'tcode-' + id});
+    var toPct = function(v){ return (v - o.min) / (o.max - o.min) * 100; };
+    function paint(){
+        var v = parseFloat(input.value), from = toPct(o.origin != null ? o.origin : o.min), to = toPct(v);
+        setRangeFill(input, Math.min(from, to), Math.max(from, to));
+        out.textContent = fmt(v);
+    }
+    input.addEventListener('input', function(){ paint(); if(onInput){ onInput(parseFloat(input.value)); } });
+    input.addEventListener('change', function(){ if(onChange){ onChange(parseFloat(input.value)); } });
+    paint();
+    return {
+        el: el('div', {class: 'tcode-range'}, [el('div', {class: 'tcode-track'}, [input]), out]),
+        set: function(v){ input.value = v; paint(); },
+        setDisabled: function(d){ input.disabled = d; }
+    };
+}
+
+// Two-handled range slider: two overlapping range inputs whose thumbs can't cross.
+// onInput(lo, hi) fires while dragging, onChange(lo, hi) on release.
+function uiDualRange(id, lo, hi, o, onInput, onChange){
+    var fmt = o.format || function(v){ return String(v); };
+    var lower = el('input', {type: 'range', class: 'lower', id: 'tcode-' + id + '-min', min: o.min, max: o.max, step: o.step || 1, value: lo,
+                             'aria-label': 'Minimum'});
+    var upper = el('input', {type: 'range', class: 'upper', id: 'tcode-' + id + '-max', min: o.min, max: o.max, step: o.step || 1, value: hi,
+                             'aria-label': 'Maximum'});
+    var out = el('output');
+    function values(){ return [parseFloat(lower.value), parseFloat(upper.value)]; }
+    function paint(){
+        var v = values(), span = o.max - o.min;
+        setRangeFill(lower, (v[0] - o.min) / span * 100, (v[1] - o.min) / span * 100);
+        out.textContent = fmt(v[0]) + ' – ' + fmt(v[1]);
+        // Upper sits above lower so its thumb isn't crossed by the lower's track; flip that
+        // when the lower thumb is near the top end, or it couldn't be grabbed there.
+        var lowerOnTop = v[0] > o.max - span * 0.05;
+        lower.style.zIndex = lowerOnTop ? 2 : 1;
+        upper.style.zIndex = lowerOnTop ? 1 : 2;
+    }
+    function onMove(e){
+        var v = values();
+        if(v[0] > v[1]){
+            if(e.target === lower){ lower.value = v[1]; } else { upper.value = v[0]; }
+        }
+        paint();
+        if(onInput){ onInput.apply(null, values()); }
+    }
+    lower.addEventListener('input', onMove); upper.addEventListener('input', onMove);
+    lower.addEventListener('change', function(){ if(onChange){ onChange.apply(null, values()); } });
+    upper.addEventListener('change', function(){ if(onChange){ onChange.apply(null, values()); } });
+    paint();
+    return { el: el('div', {class: 'tcode-range dual'}, [el('div', {class: 'tcode-track'}, [lower, upper]), out]) };
+}
+
+// --- TOASTS ---
 function showToast(title, message, type = 'info', duration = 4000) {
     if (!settings.showNotifications) return;
-
-    initToastContainer();
-
-    var icons = {
-        success: '✅',
-        info: 'ℹ️',
-        warning: '⚠️',
-        error: '❌'
-    };
-
-    var toast = document.createElement('div');
-    toast.className = 'tcode-toast toast-' + type;
-    toast.innerHTML = `
-        <span class="toast-icon">${icons[type] || icons.info}</span>
-        <div class="toast-content">
-            <div class="toast-title">${title}</div>
-            ${message ? '<div class="toast-message">' + message + '</div>' : ''}
-        </div>
-    `;
-
-    toastContainer.appendChild(toast);
-
-    // Auto-remove after duration
-    setTimeout(() => {
-        toast.classList.add('toast-exit');
-        setTimeout(() => {
-            if (toast.parentNode) toast.remove();
-        }, 300);
+    injectUiStyles();
+    var box = document.getElementById('tcode-toasts');
+    if(!box){ box = el('div', {id: 'tcode-toasts', role: 'status', 'aria-live': 'polite'}); document.body.appendChild(box); }
+    var toast = el('div', {class: 'tcode-toast ' + type}, [
+        el('div', {class: 'tcode-toast-title', text: title}),
+        message ? el('div', {class: 'tcode-toast-body', text: message}) : null
+    ]);
+    box.appendChild(toast);
+    setTimeout(function(){
+        toast.classList.add('hiding');
+        setTimeout(function(){ toast.remove(); }, 250);
     }, duration);
 }
+
 // ---------------------------------
-
-function settingsAddCheckBox(parent, id, label){
-    var line = document.createElement("div");
-    line.className = "checkbox-line";
-    var box = document.createElement("input");
-    box.setAttribute("id", id);
-    box.setAttribute("type", "checkbox");
-    var boxLabel = document.createElement("label");
-    boxLabel.setAttribute("for", id);
-    boxLabel.textContent = label;
-    line.appendChild(box);
-    line.appendChild(boxLabel);
-    parent.appendChild(line);
-}
-
-function settingsAddInput(parent, id, label){
-    var input = document.createElement("input");
-    input.setAttribute("id", id);
-    input.style.marginLeft = "3px";
-    var inputLabel = document.createElement("label");
-    inputLabel.setAttribute("for", id);
-    inputLabel.innerHTML = " " + label;
-    parent.appendChild(inputLabel);
-    parent.appendChild(input);
-}
-
-function settingsAddDualSlider(parent, minId, maxId, label, minVal, maxVal, minLimit, maxLimit) {
-    minVal = parseFloat(minVal); maxVal = parseFloat(maxVal); minLimit = parseFloat(minLimit); maxLimit = parseFloat(maxLimit);
-    if (isNaN(minVal)) minVal = 0; if (isNaN(maxVal)) maxVal = 100; if (isNaN(minLimit)) minLimit = 0; if (isNaN(maxLimit)) maxLimit = 100;
-
-    var wrapper = document.createElement("div"); wrapper.className = "dual-slider-container";
-    var labelElem = document.createElement("label"); labelElem.innerHTML = label; wrapper.appendChild(labelElem);
-
-    // Slider wrapper for positioning
-    var sliderArea = document.createElement("div");
-    sliderArea.className = "slider-area";
-    sliderArea.style.cssText = "position: relative; height: 24px; width: 100%;";
-
-    var track = document.createElement("div"); track.className = "slider-track"; sliderArea.appendChild(track);
-    var fill = document.createElement("div"); fill.className = "slider-fill"; fill.id = minId + "Fill"; sliderArea.appendChild(fill);
-
-    var minSlider = document.createElement("input");
-    minSlider.type = "range"; minSlider.id = minId;
-    minSlider.min = minLimit; minSlider.max = maxLimit; minSlider.value = minVal; minSlider.step = "1";
-    minSlider.style.cssText = "position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 100%;";
-    sliderArea.appendChild(minSlider);
-
-    var maxSlider = document.createElement("input");
-    maxSlider.type = "range"; maxSlider.id = maxId;
-    maxSlider.min = minLimit; maxSlider.max = maxLimit; maxSlider.value = maxVal; maxSlider.step = "1";
-    maxSlider.style.cssText = "position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 100%;";
-    sliderArea.appendChild(maxSlider);
-
-    wrapper.appendChild(sliderArea);
-
-    var valuesDiv = document.createElement("div"); valuesDiv.className = "dual-slider-values";
-    var minSpan = document.createElement("span"); minSpan.id = minId + "Value"; minSpan.innerHTML = minVal; valuesDiv.appendChild(minSpan);
-    var maxSpan = document.createElement("span"); maxSpan.id = maxId + "Value"; maxSpan.innerHTML = maxVal; valuesDiv.appendChild(maxSpan);
-    wrapper.appendChild(valuesDiv);
-    parent.appendChild(wrapper);
-}
-
-function settingsAddSingleSlider(parent, id, label, value, minLimit, maxLimit, suffix="ms") {
-    value = parseFloat(value); minLimit = parseFloat(minLimit); maxLimit = parseFloat(maxLimit);
-    if (isNaN(value)) value = minLimit;
-
-    var wrapper = document.createElement("div"); wrapper.className = "single-slider-container";
-    var labelElem = document.createElement("label"); labelElem.innerHTML = label; wrapper.appendChild(labelElem);
-    var sliderWrapper = document.createElement("div"); sliderWrapper.className = "slider-wrapper"; wrapper.appendChild(sliderWrapper);
-    var track = document.createElement("div"); track.className = "slider-track"; sliderWrapper.appendChild(track);
-    var fill = document.createElement("div"); fill.className = "slider-fill"; fill.id = id + "Fill"; sliderWrapper.appendChild(fill);
-
-    var slider = document.createElement("input"); slider.type = "range"; slider.id = id; slider.min = minLimit; slider.max = maxLimit; slider.value = value; slider.step = "1";
-    if(isChrome){ slider.style = "margin-top: -4px; transform: translateY(-50%)"; }
-    sliderWrapper.appendChild(slider);
-
-    var valueSpan = document.createElement("span"); valueSpan.id = id + "Value"; valueSpan.className = "single-slider-value"; valueSpan.innerHTML = String(value + suffix).padStart(6, ' ');
-    wrapper.appendChild(valueSpan);
-    parent.appendChild(wrapper);
-
-    slider.addEventListener('input', () => {
-        const currentVal = parseFloat(slider.value);
-        const range = maxLimit - minLimit;
-        const percent = ((currentVal - minLimit) / range) * 100;
-        fill.style.width = `${percent}%`;
-        valueSpan.textContent = String(currentVal + suffix).padStart(6, ' ');
-    });
-    const initialRange = maxLimit - minLimit;
-    const initialPercent = ((value - minLimit) / initialRange) * 100;
-    fill.style.width = `${initialPercent}%`;
-}
-
-function settingsAddGroupedControls(parent, checkboxId, axis, minId, maxId, sliderLabel, minVal, maxVal, minLimit, maxLimit, allSliderIds) {
-    const groupContainer = document.createElement('div'); groupContainer.classList.add('control-group'); parent.appendChild(groupContainer);
-    // Two stacked rows: the group used to be one flex line and overflowed horizontally
-    // once the home controls were added.
-    const rowTop = document.createElement('div'); rowTop.classList.add('control-row'); groupContainer.appendChild(rowTop);
-    const rowBottom = document.createElement('div'); rowBottom.classList.add('control-row', 'control-row-secondary'); groupContainer.appendChild(rowBottom);
-    const checkboxWrapper = document.createElement('div'); checkboxWrapper.classList.add('checkbox-wrapper');
-    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = checkboxId; checkbox.checked = false;
-    checkboxWrapper.appendChild(checkbox);
-    const label = document.createElement('label'); label.setAttribute('for', checkboxId); label.textContent = axis;
-    checkboxWrapper.appendChild(label); rowTop.appendChild(checkboxWrapper);
-
-    const invertWrapper = document.createElement('div'); invertWrapper.classList.add('invert-wrapper');
-    const invertCheckbox = document.createElement('input'); invertCheckbox.type = 'checkbox'; invertCheckbox.id = `invert${axis}`;
-    invertWrapper.appendChild(invertCheckbox);
-    const invertLabel = document.createElement('label'); invertLabel.setAttribute('for', `invert${axis}`); invertLabel.textContent = 'Invert';
-    invertWrapper.appendChild(invertLabel);
-    rowTop.appendChild(invertWrapper);
-
-    settingsAddDualSlider(rowTop, minId, maxId, sliderLabel, minVal, maxVal, minLimit, maxLimit);
-    const dualSliderContainer = groupContainer.querySelector('.dual-slider-container');
-
-    // --- Center controls ---
-    const cfg = settings.axes[axis] || {};
-    const centerWrapper = document.createElement('div'); centerWrapper.classList.add('center-wrapper');
-    const autoCenterCb = document.createElement('input'); autoCenterCb.type = 'checkbox'; autoCenterCb.id = `autoCenter${axis}`;
-    autoCenterCb.checked = (cfg.autoCenter !== false);
-    centerWrapper.appendChild(autoCenterCb);
-    const autoCenterLabel = document.createElement('label'); autoCenterLabel.setAttribute('for', `autoCenter${axis}`); autoCenterLabel.textContent = 'Auto home';
-    centerWrapper.appendChild(autoCenterLabel);
-    rowBottom.appendChild(centerWrapper);
-    toolTip(autoCenterCb, "Rest this axis at the middle of its range. Uncheck to pick the resting position yourself.");
-
-    var startCenter = (cfg.autoCenter === false && cfg.center != null && cfg.center !== "")
-        ? parseInt(cfg.center)
-        : Math.round(parseFloat(minVal) + ((parseFloat(maxVal) - parseFloat(minVal)) / 2));
-    settingsAddSingleSlider(rowBottom, `center${axis}`, "Home:", startCenter, minLimit, maxLimit, "");
-    const centerSlider = groupContainer.querySelector(`#center${axis}`);
-    if(centerSlider){ toolTip(centerSlider, "Where this axis sits when idle \u2014 on connect, on scene change, and via Home Now."); }
-    const centerContainer = centerSlider ? centerSlider.closest('.single-slider-container') : null;
-
-    function refreshCenterState(){
-        var auto = autoCenterCb.checked;
-        if(centerSlider){ centerSlider.disabled = auto; }
-        if(centerContainer){ centerContainer.style.opacity = auto ? '0.5' : '1'; }
-        if(auto && centerSlider){
-            // Track the live midpoint so the readout stays truthful as the range moves.
-            var lo = parseFloat(document.querySelector('#' + minId)?.value ?? minVal);
-            var hi = parseFloat(document.querySelector('#' + maxId)?.value ?? maxVal);
-            var mid = Math.round(lo + ((hi - lo) / 2));
-            centerSlider.value = mid;
-            centerSlider.dispatchEvent(new Event('input'));
-        }
-    }
-    autoCenterCb.addEventListener('change', () => {
-        settings.axes[axis].autoCenter = autoCenterCb.checked;
-        if(!autoCenterCb.checked && centerSlider){ settings.axes[axis].center = parseInt(centerSlider.value); }
-        refreshCenterState();
-        if(serialConnected){ centerAxis(axis); }
-    });
-    if(centerSlider){
-        centerSlider.addEventListener('input', () => {
-            if(autoCenterCb.checked){ return; }
-            settings.axes[axis].center = parseInt(centerSlider.value);
-        });
-        // Preview on release rather than on every input event, so dragging doesn't
-        // flood the serial writer.
-        centerSlider.addEventListener('change', () => {
-            if(!autoCenterCb.checked && serialConnected){ centerAxis(axis); }
-        });
-    }
-    groupContainer._refreshCenterState = refreshCenterState;
-    refreshCenterState();
-
-    checkbox.addEventListener('change', (event) => {
-        settings.axes[axis].enabled = event.target.checked;
-        if (event.target.checked) {
-            dualSliderContainer.classList.remove('disabled');
-            invertWrapper.style.opacity = '1';
-            rowBottom.classList.remove('disabled');
-        } else {
-            dualSliderContainer.classList.add('disabled');
-            invertWrapper.style.opacity = '0.5';
-            rowBottom.classList.add('disabled');
-        }
-    });
-    invertCheckbox.addEventListener('change', (event) => { settings.axes[axis].invert = event.target.checked; });
-    if (!checkbox.checked) {
-        dualSliderContainer.classList.add('disabled');
-        invertWrapper.style.opacity = '0.5';
-        rowBottom.classList.add('disabled');
-    }
-}
-
-function dualSliderListeners(minId, maxId) {
-    const minSlider = document.getElementById(minId); const maxSlider = document.getElementById(maxId);
-    const fill = document.getElementById(minId + "Fill"); const minValueDisplay = document.getElementById(minId + "Value"); const maxValueDisplay = document.getElementById(maxId + "Value");
-    if (!minSlider || !maxSlider || !minValueDisplay || !maxValueDisplay || !fill) return;
-
-    function updateDualSlider() {
-        let currentMinVal = parseFloat(minSlider.value); let currentMaxVal = parseFloat(maxSlider.value);
-        if (currentMinVal > currentMaxVal) { minSlider.value = currentMaxVal; }
-        if (currentMaxVal < currentMinVal) { maxSlider.value = currentMinVal; }
-        currentMinVal = parseFloat(minSlider.value); currentMaxVal = parseFloat(maxSlider.value);
-        const range = parseFloat(maxSlider.max) - parseFloat(minSlider.min);
-        const minPercent = ((currentMinVal - parseFloat(minSlider.min)) / range) * 100;
-        const maxPercent = ((currentMaxVal - parseFloat(minSlider.min)) / range) * 100;
-        fill.style.left = `${minPercent}%`; fill.style.width = `${Math.abs(maxPercent - minPercent)}%`;
-        minValueDisplay.textContent = currentMinVal; maxValueDisplay.textContent = currentMaxVal;
-        setLimits(currentMinVal, currentMaxVal, minSlider.id.replace('min', ''), false);
-        // Auto-center follows the range, so refresh its readout when the handles move.
-        const group = minSlider.closest('.control-group');
-        if(group && typeof group._refreshCenterState === 'function'){ group._refreshCenterState(); }
-    }
-    minSlider.addEventListener('input', updateDualSlider); maxSlider.addEventListener('input', updateDualSlider);
-    updateDualSlider();
-}
-
-let activeTab = 'device';
-function settingsAddTabContent(parentDiv, type, id, label, key = "") {
-    switch (type) {
-        case 'checkbox': settingsAddCheckBox(parentDiv, id, label); break;
-        case 'input': settingsAddInput(parentDiv, id, label); break;
-    }
-}
-
-function showTab(tabId) {
-    const tabContents = document.querySelectorAll('.tcode-tab-content'); tabContents.forEach(content => { content.style.display = 'none'; });
-    const tabButtons = document.querySelectorAll('.tcode-tab-button'); tabButtons.forEach(button => { button.classList.remove('active-tab'); });
-    const selectedTabContent = document.getElementById(tabId + 'Content'); if (selectedTabContent) { selectedTabContent.style.display = 'block'; }
-    const selectedTabButton = document.getElementById(tabId + 'Tab'); if (selectedTabButton) { selectedTabButton.classList.add('active-tab'); }
-    activeTab = tabId;
-}
-
-function toolTip(element, txt){
-    var tooltip = document.querySelector('#dynamic-tooltip');
-    if(!tooltip){
-        tooltip = document.createElement('div'); tooltip.id = 'dynamic-tooltip';
-        tooltip.style.position = 'absolute'; tooltip.style.backgroundColor = 'black'; tooltip.style.color = 'white';
-        tooltip.style.padding = '5px'; tooltip.style.zIndex = '200000'; tooltip.style.visibility = 'hidden';
-        document.body.appendChild(tooltip);
-    }
-    var tooltipTimeout = null;
-    element.addEventListener('mouseover', () => { tooltipTimeout = setTimeout(function(){ tooltip.textContent = txt; tooltip.style.visibility = 'visible'; }, 750); });
-    element.addEventListener('mousemove', (e) => { tooltip.style.left = e.pageX + 10 + 'px'; tooltip.style.top = e.pageY + 10 + 'px'; });
-    element.addEventListener('mouseout', () => { clearTimeout(tooltipTimeout); tooltip.style.visibility = 'hidden'; });
-}
 
 // --- NAVBAR BUTTON (appended to the very end of the Donate/Stats/Settings/Help cluster) ---
 
@@ -577,6 +397,7 @@ function injectNavStyles(){
 
 // Reflect current serial status on the nav button (dot colour + label + tooltip).
 function updateNavButton(){
+    refreshSettingsTab('device');
     var btn = document.getElementById('tcode-nav-btn');
     if(!btn){ return; }
     var labelText = btn.querySelector('.tcode-nav-label-text');
@@ -622,340 +443,212 @@ function startNavButton(){
     setInterval(injectNavButton, 1000);
 }
 
-// ----------------------------------------------------------------
+// --- SETTINGS DIALOG ---
+// A Stash-style modal with a tab per area. Controls write straight into `settings` and
+// persist immediately, so closing the dialog never has anything left to save.
 
-// Tear down the settings menu. Removes the full-screen overlay UNCONDITIONALLY, even if
-// saveSettings throws — otherwise a save error would leave the invisible overlay on top of
-// the page, swallowing every click (this was the "scene tabs stop responding" bug).
+var AXIS_LIST = ["L0", "L1", "L2", "R0", "R1", "R2"];
+var AXIS_NAMES = { L0: "Stroke", L1: "Surge", L2: "Sway", R0: "Twist", R1: "Roll", R2: "Pitch" };
+
+// Tabs in display order; later sections of the script push their own.
+var SETTINGS_TABS = [
+    { id: 'device', label: 'Device', build: buildDeviceTab },
+    { id: 'axes', label: 'Axes', build: buildAxesTab },
+    { id: 'advanced', label: 'Advanced', build: buildAdvancedTab }
+];
+var activeTab = 'device';
+
+function pct(v){ return Math.round(v / 99.99) + '%'; } // device units (0-9999) as a percentage
+function ms(v){ return Math.round(v) + ' ms'; }
+
+function settingsOpen(){ return !!document.getElementById('tcode-modal'); }
+
+function toggleMenu(){
+    if(settingsOpen()){ closeSettings(); } else { openSettings(); }
+}
+
+function openSettings(){
+    if(settingsOpen()){ return; }
+    injectUiStyles();
+    var nav = el('nav', {class: 'nav nav-tabs', role: 'tablist'});
+    var body = el('div', {id: 'tcode-modal-body'});
+    var modal = el('div', {class: 'modal fade show', id: 'tcode-modal', role: 'dialog', 'aria-modal': 'true',
+                           'aria-labelledby': 'tcode-modal-title', tabindex: '-1', style: 'display: block;'}, [
+        el('div', {class: 'modal-dialog modal-lg modal-dialog-scrollable'}, [
+            el('div', {class: 'modal-content'}, [
+                el('div', {class: 'modal-header'}, [
+                    el('div', {class: 'modal-title h4', id: 'tcode-modal-title'}, ['TCode']),
+                    el('button', {type: 'button', class: 'close', 'aria-label': 'Close', onclick: closeSettings}, [el('span', {'aria-hidden': 'true', text: '×'})])
+                ]),
+                el('div', {class: 'modal-body'}, [nav, body]),
+                el('div', {class: 'modal-footer'}, [
+                    el('span', {class: 'tcode-version', text: 'Stash-TCode ' + GM_info.script.version}),
+                    uiButton('Close', 'secondary', closeSettings)
+                ])
+            ])
+        ])
+    ]);
+    // Clicking the dimmed area outside the dialog closes it.
+    modal.addEventListener('mousedown', function(e){ if(e.target === modal){ closeSettings(); } });
+    document.body.appendChild(el('div', {class: 'modal-backdrop fade show', id: 'tcode-modal-backdrop'}));
+    document.body.appendChild(modal);
+    document.body.classList.add('modal-open');
+    document.addEventListener('keydown', onSettingsKey, true);
+    for(var tab of SETTINGS_TABS){
+        nav.appendChild(el('a', {class: 'nav-item nav-link', role: 'tab', 'data-tab': tab.id, text: tab.label,
+                                 onclick: (function(id){ return function(){ showTab(id); }; })(tab.id)}));
+    }
+    showTab(activeTab);
+    modal.focus();
+}
+
+// Removes the dialog unconditionally: a stray full-screen layer would swallow every
+// click on the page.
 function closeSettings(){
     try { saveSettings(); } catch(e){ debug("[TCode] saveSettings error on close: " + e); }
-    var overlayEl = document.getElementById("settings-overlay");
-    if(overlayEl){ overlayEl.remove(); }
-    var styleEl = document.getElementById("stash-tcode-styles");
-    if(styleEl){ styleEl.remove(); }
-}
-
-function toggleMenu() {
-    if (document.getElementById("settings-overlay") != null) {
-        document.getElementById("settings-close-btn").click();
-        return -1;
+    for(var id of ['tcode-modal', 'tcode-modal-backdrop']){
+        var node = document.getElementById(id);
+        if(node){ node.remove(); }
     }
-
-    // Modern dark theme stylesheet
-    const styleSheet = document.createElement("style");
-    styleSheet.id = "stash-tcode-styles";
-    styleSheet.type = "text/css";
-    styleSheet.innerText = `
-/* Overlay backdrop with blur */
-#settings-overlay {
-    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    z-index: 999998; display: flex; align-items: center; justify-content: center;
+    document.body.classList.remove('modal-open');
+    document.removeEventListener('keydown', onSettingsKey, true);
 }
 
-/* Main settings panel */
-#settings {
-    position: relative; width: 90%; max-width: 700px; max-height: 85vh;
-    background: linear-gradient(145deg, #1a1a2e 0%, #16213e 100%);
-    border-radius: 16px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1);
-    overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+function onSettingsKey(e){
+    if(e.key === 'Escape'){ e.stopPropagation(); closeSettings(); }
 }
 
-/* Header */
-#settings .settings-header {
-    background: linear-gradient(90deg, #0f3460 0%, #533483 100%);
-    padding: 20px 24px; display: flex; align-items: center; justify-content: space-between;
-}
-#settings .settings-title {
-    font-size: 1.5em; font-weight: 700; color: #fff; letter-spacing: 0.5px;
-    text-shadow: 0 2px 4px rgba(0,0,0,0.3);
-}
-#settings-close-btn {
-    width: 36px; height: 36px; border-radius: 50%; border: none;
-    background: rgba(255,255,255,0.1); color: #fff; font-size: 1.4em;
-    cursor: pointer; transition: all 0.2s ease; display: flex; align-items: center; justify-content: center;
-}
-#settings-close-btn:hover { background: rgba(255,255,255,0.2); transform: scale(1.1); }
-
-/* Tab navigation */
-#tabContainer {
-    display: flex; background: rgba(0,0,0,0.3); padding: 0 16px; gap: 4px;
-}
-.tcode-tab-button {
-    padding: 14px 20px; border: none; background: transparent; color: rgba(255,255,255,0.6);
-    font-size: 0.95em; font-weight: 500; cursor: pointer; transition: all 0.2s ease;
-    border-bottom: 3px solid transparent; text-transform: uppercase; letter-spacing: 0.5px;
-}
-.tcode-tab-button:hover { color: rgba(255,255,255,0.9); background: rgba(255,255,255,0.05); }
-.tcode-tab-button.active-tab {
-    color: #e94560 !important; border-bottom-color: #e94560 !important;
-    background: rgba(233, 69, 96, 0.1) !important;
-}
-
-/* Tab content area */
-#tabContentContainer {
-    padding: 24px; max-height: calc(85vh - 140px); overflow-y: auto; color: #e0e0e0;
-}
-#tabContentContainer::-webkit-scrollbar { width: 8px; }
-#tabContentContainer::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); border-radius: 4px; }
-#tabContentContainer::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 4px; }
-#tabContentContainer::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
-.tcode-tab-content { display: none; animation: fadeIn 0.3s ease; }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-
-/* Control groups */
-.control-group {
-    display: flex; flex-direction: column; align-items: stretch; gap: 10px; padding: 16px 20px; margin-bottom: 12px;
-    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 12px; transition: all 0.2s ease;
-}
-.control-group:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.15); }
-.control-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; width: 100%; min-width: 0; }
-.control-row > .dual-slider-container, .control-row > .single-slider-container { flex: 1 1 240px; min-width: 200px; }
-.control-row-secondary { padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.08); }
-.control-row.disabled { pointer-events: none; opacity: 0.4; }
-.checkbox-line { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
-.checkbox-line label { color: rgba(255,255,255,0.85); font-size: 0.95em; cursor: pointer; line-height: 1.3; }
-.checkbox-line input[type="checkbox"] { flex: 0 0 auto; margin: 0; }
-.center-wrapper { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-.center-wrapper label { color: rgba(255,255,255,0.7); font-size: 0.9em; }
-.checkbox-wrapper { display: flex; align-items: center; gap: 8px; min-width: 50px; }
-.checkbox-wrapper label { color: #fff; font-weight: 600; font-size: 1.1em; }
-.random-wrapper { display: flex; align-items: center; gap: 8px; }
-.random-wrapper label { color: rgba(255,255,255,0.7); font-size: 0.9em; }
-.invert-wrapper { display: flex; align-items: center; gap: 8px; }
-.invert-wrapper label { color: rgba(255,255,255,0.7); font-size: 0.9em; }
-
-/* Custom checkboxes */
-.control-group input[type="checkbox"], #tabContentContainer input[type="checkbox"] {
-    width: 20px; height: 20px; accent-color: #e94560; cursor: pointer;
-}
-
-/* Dropdowns */
-.control-group select, #tabContentContainer select {
-    background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);
-    color: #fff; padding: 6px 10px; border-radius: 6px; cursor: pointer;
-}
-.control-group select option, #tabContentContainer select option {
-    background: #1a1a2e; color: #fff;
-}
-.control-group select:focus, #tabContentContainer select:focus { outline: none; border-color: #e94560; }
-
-/* Dual slider container */
-.dual-slider-container {
-    flex: 1; min-width: 200px; margin: 0; padding: 5px 0;
-}
-.dual-slider-container.disabled { pointer-events: none; opacity: 0.4; }
-.dual-slider-container > label { display: block; margin-bottom: 8px; color: rgba(255,255,255,0.7); font-size: 0.9em; }
-.dual-slider-container .slider-area {
-    position: relative; height: 24px; width: 100%;
-}
-.dual-slider-container .slider-track {
-    position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%);
-    height: 6px; border-radius: 3px; background: rgba(255,255,255,0.15); z-index: 0;
-}
-.dual-slider-container .slider-fill {
-    position: absolute; top: 50%; transform: translateY(-50%);
-    height: 6px; border-radius: 3px; background: linear-gradient(90deg, #e94560, #533483);
-    z-index: 1; left: 0; width: 100%;
-}
-.dual-slider-container input[type="range"] {
-    -webkit-appearance: none; appearance: none; width: 100%; outline: none;
-    background: transparent; pointer-events: none; z-index: 3; margin: 0; height: 24px;
-}
-.dual-slider-container input[type="range"]::-webkit-slider-runnable-track {
-    height: 6px; background: transparent;
-}
-.dual-slider-container input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none; appearance: none; height: 18px; width: 18px;
-    background: #fff; cursor: pointer; pointer-events: auto; border-radius: 50%;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.3), 0 0 0 2px rgba(233, 69, 96, 0.3);
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
-    margin-top: -6px;
-}
-.dual-slider-container input[type="range"]::-webkit-slider-thumb:hover {
-    transform: scale(1.15);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.4), 0 0 0 3px rgba(233, 69, 96, 0.4);
-}
-.dual-slider-container input[type="range"]:hover { z-index: 10; }
-.dual-slider-container input[type="range"]:active { z-index: 11; }
-.dual-slider-values {
-    display: flex; justify-content: space-between; margin-top: 8px;
-    font-size: 0.85em; color: rgba(255,255,255,0.7); font-weight: 500;
-}
-.dual-slider-values span {
-    min-width: 40px; text-align: center;
-}
-
-/* Single slider */
-.single-slider-container {
-    display: flex; align-items: center; gap: 16px; width: 100%;
-    padding: 16px 20px; background: rgba(255,255,255,0.05);
-    border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; margin-bottom: 12px;
-}
-.single-slider-container label { color: #fff; font-weight: 500; min-width: 60px; }
-.single-slider-container .slider-wrapper {
-    position: relative; flex-grow: 1; display: flex; align-items: center; height: 24px;
-}
-.single-slider-container .slider-track, .single-slider-container .slider-fill {
-    position: absolute; height: 6px; border-radius: 3px; left: 0; top: 50%; transform: translateY(-50%); width: 100%;
-}
-.single-slider-container .slider-track { background: rgba(255,255,255,0.15); }
-.single-slider-container .slider-fill { background: linear-gradient(90deg, #e94560, #533483); }
-.single-slider-container input[type="range"] {
-    -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer;
-    width: 100%; position: absolute; left: 0; top: 50%; transform: translateY(-50%); z-index: 2;
-}
-.single-slider-container input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none; height: 20px; width: 20px; background: #fff;
-    border-radius: 50%; box-shadow: 0 2px 6px rgba(0,0,0,0.3); cursor: pointer;
-}
-.single-slider-container input[type="range"]::-webkit-slider-runnable-track { background: transparent; }
-.single-slider-value {
-    flex-shrink: 0; min-width: 60px; text-align: right; color: rgba(255,255,255,0.8);
-    font-family: 'SF Mono', Monaco, monospace; font-size: 0.9em;
-}
-
-/* Buttons */
-#tabContentContainer button {
-    padding: 12px 24px; border: none; border-radius: 8px; font-size: 0.95em;
-    font-weight: 600; cursor: pointer; transition: all 0.2s ease; margin: 8px 8px 8px 0;
-}
-#btnConnectUSB {
-    background: linear-gradient(135deg, #e94560 0%, #533483 100%) !important;
-    color: #fff !important; box-shadow: 0 4px 15px rgba(233, 69, 96, 0.3);
-}
-#btnConnectUSB:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(233, 69, 96, 0.4); }
-#btnConnectUSB:disabled { opacity: 0.6; cursor: not-allowed; }
-#initialKey, #minKey, #settingsKey {
-    background: rgba(255,255,255,0.1) !important; color: #fff !important;
-    border: 1px solid rgba(255,255,255,0.2) !important;
-}
-#initialKey:hover, #minKey:hover, #settingsKey:hover {
-    background: rgba(255,255,255,0.15) !important; border-color: #e94560 !important;
-}
-
-/* Labels in tab content */
-#tabContentContainer > label { color: rgba(255,255,255,0.8); display: flex; align-items: center; gap: 8px; margin: 12px 0; }
-`;
-    document.head.appendChild(styleSheet);
-
-    // Create overlay backdrop
-    var overlay = document.createElement("div");
-    overlay.setAttribute("id", "settings-overlay");
-
-    // Main settings panel
-    var div = document.createElement("div");
-    div.setAttribute("id", "settings");
-
-    // Header
-    var header = document.createElement("div");
-    header.className = "settings-header";
-    var title = document.createElement("span");
-    title.className = "settings-title";
-    title.innerHTML = "⚙️ TCode Settings";
-    var closeBtn = document.createElement("button");
-    closeBtn.id = "settings-close-btn";
-    closeBtn.innerHTML = "✕";
-    header.appendChild(title);
-    header.appendChild(closeBtn);
-    div.appendChild(header);
-
-    // Tab container
-    var tabContainer = document.createElement("div");
-    tabContainer.id = "tabContainer";
-    div.appendChild(tabContainer);
-
-    // Tab content container
-    var tabContentContainer = document.createElement("div");
-    tabContentContainer.id = "tabContentContainer";
-    div.appendChild(tabContentContainer);
-
-    // Create tabs
-    const tabs = ['device', 'axes', 'advanced'];
-    const tabContents = {};
-    const tabIcons = { device: '🔌', axes: '🎚️', advanced: '🔧' };
-    tabs.forEach(t => {
-        const btn = document.createElement('button');
-        btn.id = t + 'Tab';
-        btn.className = 'tcode-tab-button';
-        btn.innerHTML = tabIcons[t] + ' ' + t.charAt(0).toUpperCase() + t.slice(1);
-        btn.addEventListener('click', () => showTab(t));
-        tabContainer.appendChild(btn);
-        const content = document.createElement('div');
-        content.id = t + 'Content';
-        content.className = 'tcode-tab-content';
-        content.style.display = 'none';
-        tabContentContainer.appendChild(content);
-        tabContents[t] = content;
+function showTab(id){
+    if(!SETTINGS_TABS.some(function(t){ return t.id === id; })){ id = SETTINGS_TABS[0].id; }
+    activeTab = id;
+    document.querySelectorAll('#tcode-modal .nav-tabs .nav-link').forEach(function(a){
+        var on = a.getAttribute('data-tab') === id;
+        a.classList.toggle('active', on);
+        a.setAttribute('aria-selected', on ? 'true' : 'false');
     });
+    renderActiveTab();
+}
 
-    // Device tab content
-    const deviceContentDiv = tabContents['device'];
-    const usbBtn = document.createElement('button');
-    usbBtn.id = "btnConnectUSB";
-    usbBtn.innerText = serialConnected ? "✓ USB Connected" : "🔗 Connect Serial (USB)";
-    usbBtn.onclick = function() { connectSerial(); };
-    if (serialConnected) usbBtn.disabled = true;
-    deviceContentDiv.appendChild(usbBtn);
-    settingsAddTabContent(deviceContentDiv, "checkbox", "autoConnect", "Reconnect automatically (page load and re-plug)");
-    deviceContentDiv.appendChild(document.createElement("br"));
-    settingsAddSingleSlider(deviceContentDiv, "sync", "Sync:", settings.sync, -250, 250);
-    settingsAddTabContent(deviceContentDiv, "checkbox", "homeEnabled", "Home axes on connect & scene change");
-    const homeEnabledCb = document.getElementById("homeEnabled");
-    if(homeEnabledCb){ toolTip(homeEnabledCb, "Off leaves the device wherever it stopped. The Home Now button still works either way."); }
-    settingsAddSingleSlider(deviceContentDiv, "centerTime", "Home time:", settings.centerTime, 100, 5000);
-    const centerTimeSlider = document.getElementById("centerTime");
-    if(centerTimeSlider){ toolTip(centerTimeSlider, "How long the device takes to travel to its home position. Higher is slower and gentler."); }
-    deviceContentDiv.appendChild(document.createElement("br"));
-    const centerNowBtn = document.createElement("button");
-    centerNowBtn.id = "btnCenterNow"; centerNowBtn.innerText = "Home Now";
-    centerNowBtn.addEventListener("click", function(){ saveSettings(false); centerAll(); }, false);
-    deviceContentDiv.appendChild(centerNowBtn);
-    toolTip(centerNowBtn, "Move every enabled axis to its home position now.");
+// Rebuild the visible tab from current state (after a connection change, etc.).
+function renderActiveTab(){
+    var body = document.getElementById('tcode-modal-body');
+    if(!body){ return; }
+    var tab = SETTINGS_TABS.find(function(t){ return t.id === activeTab; });
+    body.textContent = '';
+    tab.build(body);
+}
 
-    // Axes tab content
-    const axesContentDiv = tabContents['axes'];
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
-        settingsAddGroupedControls(axesContentDiv, "enable"+ax, ax, "min"+ax, "max"+ax, "Range:", getLimit(ax,LOWER), getLimit(ax,UPPER), 0, 9999, listAxes(ax));
+// Re-render only if the given tab is the one showing, so live updates don't reset a
+// tab the user is working in.
+function refreshSettingsTab(id){
+    if(settingsOpen() && activeTab === id){ renderActiveTab(); }
+}
+
+// ---- Device tab ----
+function buildDeviceTab(body){
+    var card = uiSection(body, "Device");
+    var status;
+    if(!serialConnected){ status = "Not connected"; }
+    else if(simulatedDevice){ status = "Simulated device (debug)"; }
+    else { status = "Connected over USB" + portLabel(); }
+    var statusEl = el('span', {class: 'tcode-status'}, [el('span', {class: 'tcode-dot' + (serialConnected ? ' on' : '')}), status]);
+    var row = uiSetting(card, "TCode device", null,
+        serialConnected ? uiButton("Disconnect", "secondary", disconnectSerial)
+                        : uiButton("Connect", "primary", connectSerial));
+    row.firstChild.appendChild(el('div', {class: 'sub-heading'}, [statusEl]));
+    uiSetting(card, "Reconnect automatically", "Reopen the device on page load, and when it's plugged back in.",
+        uiSwitch('autoConnect', settings.autoConnect !== false, function(v){ settings.autoConnect = v; saveSettings(); }));
+
+    var play = uiSection(body, "Playback");
+    uiSetting(play, "Sync offset", "Shifts the script against the video. Positive plays strokes earlier.",
+        uiRange('sync', parseInt(settings.sync) || 0, {min: -250, max: 250, origin: 0, format: ms}, null,
+                function(v){ settings.sync = v; saveSettings(); }).el);
+
+    var home = uiSection(body, "Homing");
+    uiSetting(home, "Home on connect and scene change", "Off leaves the device wherever it stopped.",
+        uiSwitch('homeEnabled', settings.homeEnabled !== false, function(v){ settings.homeEnabled = v; saveSettings(); }));
+    uiSetting(home, "Home travel time", "How long the move to the home position takes. Longer is gentler.",
+        uiRange('centerTime', parseInt(settings.centerTime) || 1000, {min: 100, max: 5000, step: 50, format: ms}, null,
+                function(v){ settings.centerTime = v; saveSettings(); }).el);
+    uiSetting(home, "Home now", "Move every enabled axis to its home position.",
+        uiButton("Home now", "secondary", function(){ centerAll(); }, {disabled: !serialConnected}));
+}
+
+function portLabel(){
+    var p = settings.serialPort;
+    if(!p || p.usbVendorId == null){ return ""; }
+    var hex = function(n){ return Number(n).toString(16).toUpperCase().padStart(4, '0'); };
+    return " (" + hex(p.usbVendorId) + ":" + hex(p.usbProductId) + ")";
+}
+
+// ---- Axes tab ----
+function buildAxesTab(body){
+    var card = uiSection(body, "Axes", "Range limits how far each axis travels. Home is where it rests when idle.");
+    AXIS_LIST.forEach(function(axis){ buildAxisGroup(card, axis); });
+}
+
+function buildAxisGroup(card, axis){
+    var cfg = settings.axes[axis];
+    var group = el('div', {class: 'setting-group' + (cfg.enabled ? '' : ' collapsed')});
+    card.appendChild(group);
+
+    uiSetting(group, axis + " · " + AXIS_NAMES[axis], null, uiSwitch('enable' + axis, cfg.enabled, function(v){
+        cfg.enabled = v;
+        group.classList.toggle('collapsed', !v);
+        saveSettings();
+    }));
+
+    var lim = getLimit(axis, BOTH);
+    var homeRange;
+    function applyRange(lo, hi, send){
+        cfg.limits = [lo, hi];
+        if(AXIS[axis]){ setLimits(lo, hi, axis, send); }
+        if(send){ saveSettings(); }
+        syncHome();
+    }
+    uiSetting(group, "Range", null,
+        uiDualRange('range' + axis, parseInt(lim[0]), parseInt(lim[1]), {min: 0, max: 9999, format: pct},
+            function(lo, hi){ applyRange(lo, hi, false); },
+            function(lo, hi){ applyRange(lo, hi, true); }).el, {sub: true});
+    uiSetting(group, "Invert", "Flip the direction of this axis.",
+        uiSwitch('invert' + axis, cfg.invert, function(v){ cfg.invert = v; saveSettings(); }), {sub: true});
+    uiSetting(group, "Auto home", "Rest at the middle of the range. Turn off to choose the home position.",
+        uiSwitch('autoCenter' + axis, cfg.autoCenter !== false, function(v){
+            cfg.autoCenter = v;
+            if(!v){ cfg.center = getCenter(axis); }
+            saveSettings();
+            syncHome();
+            if(serialConnected){ centerAxis(axis); }
+        }), {sub: true});
+    homeRange = uiRange('center' + axis, getCenter(axis), {min: 0, max: 9999, format: pct}, null, function(v){
+        cfg.center = v;
+        saveSettings();
+        if(serialConnected){ centerAxis(axis); } // preview on release, not on every input event
     });
+    var homeRow = uiSetting(group, "Home position", null, homeRange.el, {sub: true});
 
-    // Advanced tab content
-    const advancedContentDiv = tabContents['advanced'];
-    settingsAddTabContent(advancedContentDiv, "checkbox", "showNotifications", "Show Script Load Notifications");
-    settingsAddTabContent(advancedContentDiv, "checkbox", "debug", "Enable Debug Mode");
+    function syncHome(){
+        var auto = cfg.autoCenter !== false;
+        homeRange.setDisabled(auto);
+        homeRow.classList.toggle('disabled', auto);
+        if(auto){ homeRange.set(getCenter(axis)); }
+    }
+    syncHome();
+}
 
-    // Append panel to overlay, then overlay to body
-    overlay.appendChild(div);
-    document.body.appendChild(overlay);
-
-    showTab(activeTab);
-    settingsMenuApplySaved();
-
-    // Close button handler
-    closeBtn.addEventListener("click", function(){ closeSettings(); }, false);
-
-    // Click on backdrop to close
-    overlay.addEventListener("click", function(e){
-        if (e.target === overlay) closeBtn.click();
-    }, false);
-
-    document.getElementById("settings").addEventListener("change", function(){ saveSettings(false); }, false);
-    // Set each slider to the saved/live range before wiring listeners.
-    // (settingsMenuApplySaved restores checkboxes/dropdowns but never the range sliders,
-    //  so without this the handles show 0-9999 even when a range is stored.)
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => {
-        var lim = (AXIS[ax] && AXIS[ax].limits) ? AXIS[ax].limits
-                : (settings.axes[ax] && settings.axes[ax].limits) ? settings.axes[ax].limits
-                : [0, 9999];
-        var minEl = document.querySelector('#min'+ax);
-        var maxEl = document.querySelector('#max'+ax);
-        if(minEl){ minEl.value = lim[0]; }
-        if(maxEl){ maxEl.value = lim[1]; }
-    });
-    // dualSliderListeners runs updateDualSlider() immediately, redrawing the fill bar
-    // and the min/max value labels to match the values just set above.
-    ["L0","L1","L2","R0","R1","R2"].forEach(ax => dualSliderListeners("min"+ax, "max"+ax));
+// ---- Advanced tab ----
+function buildAdvancedTab(body){
+    var card = uiSection(body, "Advanced");
+    uiSetting(card, "Notifications", "Show pop-ups for connections and script loading.",
+        uiSwitch('showNotifications', settings.showNotifications !== false, function(v){ settings.showNotifications = v; saveSettings(); }));
+    uiSetting(card, "Debug mode", "Log details to the console and show the debug tools below.",
+        uiSwitch('debug', settings.debug, function(v){ settings.debug = v; saveSettings(); renderActiveTab(); }));
+    if(settings.debug){
+        var dbg = uiSection(body, "Debug tools", "window.__tcode is available in the page console.");
+        uiSetting(dbg, "Simulated device", "Stands in for a TCode device: commands are recorded, nothing is sent.",
+            uiButton(simulatedDevice ? "Running" : "Start", "secondary", function(){ connectSimulatedDevice(); renderActiveTab(); },
+                     {disabled: serialConnected}));
+    }
 }
 
 // --- WEB SERIAL IMPLEMENTATION ---
@@ -1000,11 +693,6 @@ async function openPort(p, silent) {
         settings.serialPort = { usbVendorId: info.usbVendorId ?? null, usbProductId: info.usbProductId ?? null };
         GM_setValue("settings", settings);
     } catch (e) { debug("[TCode] getInfo failed: " + e); }
-    var usbBtn = document.getElementById("btnConnectUSB");
-    if (usbBtn) {
-        usbBtn.innerText = "USB Connected";
-        usbBtn.disabled = true;
-    }
     debug("USB Serial Connected");
     showToast(silent ? "USB Reconnected" : "USB Connected", "Serial connection established at 115200 baud", "success");
     updateNavButton(); // reflect connected state on the navbar
@@ -1058,19 +746,39 @@ async function readSerialLoop() {
             }
         } catch (error) { console.error(error); } finally { reader.releaseLock(); }
     }
-    // Loop exited -> port no longer readable (device unplugged / closed). Reflect that.
+    // Loop exited -> port no longer readable (device unplugged) or we were asked to stop.
+    var manual = !keepReading;
+    var w = writer;
     serialConnected = false;
     writer = null;
-    // Close our side so the same port can be reopened when the device comes back.
+    // Release both pipes, then close our side so the same port can be reopened later.
+    // Each step is time-boxed: on an unplugged device they can stall instead of failing.
+    var settle = function(p){ return Promise.race([Promise.resolve(p).catch(function(){}), new Promise(function(r){ setTimeout(r, 500); })]); };
+    if (w) { await settle(w.close()); }
+    await settle(writableStreamClosed);
+    await settle(readableStreamClosed);
     try { await port.close(); } catch (e) { debug("[TCode] port.close after disconnect: " + e); }
-    var usbBtn = document.getElementById("btnConnectUSB");
-    if (usbBtn) {
-        usbBtn.innerText = "🔗 Connect Serial (USB)";
-        usbBtn.disabled = false;
+    if (manual) {
+        showToast("USB Disconnected", "", "info");
+    } else {
+        showToast("USB Disconnected", settings.autoConnect !== false ? "Will reconnect when the device is plugged back in" : "", "warning");
     }
-    showToast("USB Disconnected", settings.autoConnect !== false ? "Will reconnect when the device is plugged back in" : "", "warning");
     updateNavButton();
     debug("[TCode] Serial disconnected");
+}
+
+// Stop talking to the device. Auto-connect still applies on the next page load.
+async function disconnectSerial() {
+    if (simulatedDevice) {
+        simulatedDevice = false;
+        serialConnected = false;
+        writer = null;
+        updateNavButton();
+        return;
+    }
+    if (!serialConnected) { return; }
+    keepReading = false;
+    try { if (reader) { await reader.cancel(); } } catch (e) { debug("[TCode] reader.cancel: " + e); }
 }
 
 function sendTCode(data) {
@@ -1104,7 +812,7 @@ function connectSimulatedDevice(){
         write: function(data){
             if(String(data).indexOf("D2") !== -1){
                 setTimeout(function(){
-                    processWSReply({ data: "L0 0 9999\nL1 0 9999\nL2 0 9999\nR0 0 9999\nR1 0 9999\nR2 0 9999\n" });
+                    processWSReply({ data: "L0 0 9999\n" }); // a plain single-axis stroker
                 }, 20);
             }
             return Promise.resolve();
@@ -1606,8 +1314,9 @@ function processLimits(data){
     }
     if(axesFound.length > 0){
         showToast("Axes Auto-Enabled", "Enabled " + axesFound.join(", ") + " based on device capabilities", "info");
-        saveSettings(false); // Save without sending to device
+        saveSettings();
     }
+    refreshSettingsTab('axes');
 }
 
 function processWSReply(event){
