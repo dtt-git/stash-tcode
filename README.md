@@ -6,7 +6,7 @@ It plays a scene's funscripts, including multi-axis ones, on the device in sync 
 With a Bluetooth heart-rate monitor it can also shorten strokes as your heart rate climbs and hold
 off at the edge.
 
-Maintained by **dtt**. Originally based on Stash-TCode by Steel, with modifications by Spunkle.
+Maintained by **dtt**. Originally based on Stash-TCode by Spunkle, with modifications by Steel.
 
 ## Features
 
