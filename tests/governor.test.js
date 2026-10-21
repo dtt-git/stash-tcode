@@ -8,7 +8,7 @@ const section = src.slice(start, end);
 
 // Minimal stand-ins for the script globals the section touches.
 const env = `
-var settings = { sync: 0, hr: { enabled: true, climaxHr: 140, band: 10, floor: 30, rejoinSec: 8,
+var settings = { sync: 0, hr: { enabled: true, edgeHr: 140, band: 10, floor: 30, rejoinSec: 8,
     timeoutSec: 8, decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105, climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15 },
     axes: { R0: { autoCenter: true } } };
 var hr = { bpm: null, at: 0, status: 'live' };
@@ -58,7 +58,7 @@ check('2 edges: 138', wc(2).ceiling === 138 && wc(2).decay === 2);
 check('4 edges: 136', wc(4).ceiling === 136);
 check('6 edges: 134', wc(6).ceiling === 134);
 check('floor stops decay at 105', wc(100).ceiling === 105 && wc(100).decay === 35);
-check('floor never raises a low ceiling', wc(10, { climaxHr: 95 }).ceiling === 95);
+check('floor never raises a low ceiling', wc(10, { edgeHr: 95 }).ceiling === 95);
 check('decay off', wc(10, { decay: false }).ceiling === 140);
 
 // --- rejoin ---

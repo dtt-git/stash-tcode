@@ -117,12 +117,18 @@ function loadSettings(){
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
                            "hr": { deviceId: null, deviceName: null, enabled: false,
-                                   climaxHr: 140, band: 10, floor: 30, rejoinSec: 8, timeoutSec: 8,
+                                   edgeHr: 140, band: 10, floor: 30, rejoinSec: 8, timeoutSec: 8,
                                    decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105,
                                    climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15, climaxTag: "Climax" },
                            "currentVersion": thisVersion};
     settings = GM_getValue("settings", defaultSettings);
     handleUpgrade(thisVersion);
+    // "Climax HR" was renamed "Edge HR": it's where an edge is called, not a climax.
+    // Carry the old value over before defaults are filled in.
+    if(settings.hr && settings.hr.climaxHr != null){
+        if(settings.hr.edgeHr == null){ settings.hr.edgeHr = settings.hr.climaxHr; }
+        delete settings.hr.climaxHr;
+    }
     backfillDefaults(settings, defaultSettings);
     // Drop settings for features that no longer exist (hotkeys, random motion).
     for(const gone of ["device", "initialKey", "minKey", "settingsKey", "syncKey"]){ delete settings[gone]; }
@@ -701,8 +707,8 @@ function buildHrTab(body){
     live.firstChild.appendChild(el('div', {class: 'sub-heading', id: 'tcode-gov-status', text: govStatusText(lastGov)}));
 
     var rates = uiSection(body, "Heart rate");
-    uiSetting(rates, "Climax", "The heart rate where you'd climax. This is the ceiling: strokes stop here.",
-        uiNumber('climaxHr', cfg.climaxHr, {min: 50, max: 250, suffix: "BPM"}, function(v){ cfg.climaxHr = v; changed(); }));
+    uiSetting(rates, "Edge", "The heart rate that counts as an edge. This is the ceiling: strokes stop here until you recover.",
+        uiNumber('edgeHr', cfg.edgeHr, {min: 50, max: 250, suffix: "BPM"}, function(v){ cfg.edgeHr = v; changed(); }));
 
     var resp = uiSection(body, "Response");
     uiSetting(resp, "Approach band", "Strokes start shortening this many BPM below the ceiling. 0 only reacts at the ceiling.",
@@ -1720,9 +1726,9 @@ var climaxMarksMs = [];     // climax mark times for the current scene (scene ms
 var lastGov = null;         // most recent governor result, for the UI
 
 // The ceiling after adaptive decay. The floor can stop the decay but never raise the
-// ceiling above the typed climax HR. Returns {ceiling, decay}.
+// ceiling above the edge HR you set. Returns {ceiling, decay}.
 function workingCeiling(cfg, edges){
-    var typed = cfg.climaxHr;
+    var typed = cfg.edgeHr;
     if(!cfg.decay || !(edges > 0)){ return { ceiling: typed, decay: 0 }; }
     var drop = Math.floor(edges / Math.max(1, cfg.decayEvery)) * cfg.decayBpm;
     var ceiling = Math.min(typed, Math.max(cfg.decayFloor, typed - drop));

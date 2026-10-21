@@ -41,7 +41,7 @@ Connect a monitor under **Device → Heart rate monitor**. Any monitor with the 
 heart-rate service works: chest straps (Polar, Coospo, Garmin, Wahoo, ...) or a watch broadcasting
 its heart rate. Then turn it on under **Heart Rate**.
 
-- **Climax** is your ceiling. In the **approach band** below it (default 10 BPM), strokes shorten
+- **Edge** is the heart rate that counts as an edge, and it's your ceiling. In the **approach band** below it (default 10 BPM), strokes shorten
   linearly down to the **shortest stroke** (default 30%). The stroke shortens from the bottom of its
   range; other axes shrink toward their home position.
 - **At the ceiling** the stroker parks at the bottom of its range and sits out the script while the
