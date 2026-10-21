@@ -394,6 +394,7 @@ function injectNavStyles(){
         }
         #tcode-nav-btn.connected .tcode-nav-dot { background: #0f9960; }
         #tcode-nav-btn .tcode-nav-hr { margin-left: 8px; font-variant-numeric: tabular-nums; }
+        #tcode-nav-btn .tcode-nav-heart { color: #ff7373; margin-right: 3px; }
     `;
     document.head.appendChild(s);
 }
@@ -433,7 +434,7 @@ function injectNavButton(){
     btn.className = 'nav-utility minimal d-flex align-items-center h-100 btn btn-primary';
     btn.innerHTML = '<span class="tcode-nav-dot"></span>' +
         '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span>' +
-        '<span class="tcode-nav-hr" style="display: none"></span>';
+        '<span class="tcode-nav-hr" style="display: none"><span class="tcode-nav-heart">♥</span><span class="tcode-nav-bpm"></span></span>';
     btn.addEventListener('click', function(){ toggleMenu(); });
 
     navButtons.appendChild(btn); // very end of the cluster
@@ -1134,7 +1135,7 @@ function hrStatusText(){
 function updateHrUi(){
     var navHr = document.querySelector('#tcode-nav-btn .tcode-nav-hr');
     if(navHr){
-        navHr.textContent = hrLive() ? "♥ " + hr.bpm : "";
+        navHr.querySelector('.tcode-nav-bpm').textContent = hrLive() ? hr.bpm : "";
         navHr.style.display = hrLive() ? "" : "none";
     }
     var line = document.getElementById('tcode-hr-status');
