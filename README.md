@@ -163,8 +163,8 @@ If you don't bump the version, Tampermonkey ignores the change.
 ## Credits
 
 - **dtt**: current maintainer.
-- **Steel**: wrote the original Stash-TCode userscript.
-- **Spunkle**: made the modded version this project builds on.
+- **Spunkle**: wrote the original Stash-TCode userscript.
+- **Steel**: made the modded version this project builds on.
 - Heart-rate modulation is inspired by [EdgeLoop](https://github.com/marshallmims/edgeloop) by
   marshallmims (AGPL-3.0) and reimplemented independently here.
 
