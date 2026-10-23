@@ -6,7 +6,7 @@
 (function(){
 
 // --- HOST ---
-const TCODE_VERSION = '1.0.0'; // keep in step with version: in stash-tcode.yml
+const TCODE_VERSION = '1.1.0'; // keep in step with version: in stash-tcode.yml
 const PLUGIN_ID = 'stash-tcode';
 const STORE_PREFIX = 'stash-tcode:';
 // Settings the retired Tampermonkey userscript leaves here when it finds this plugin installed.
@@ -212,7 +212,8 @@ async function loadStashSettings(){
 function loadSettings(stored){
     var thisVersion = TCODE_VERSION;
     var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5,
-                                                  speedLimit: false, maxSpeed: 5, link: "", linkOverride: false}; };
+                                                  speedLimit: false, maxSpeed: 5, link: "", linkOverride: false,
+                                                  idle: false, idleHz: 0.2, idleRange: 100}; }; // idle motion: L0 only
     var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true, "knownAxes": [],
                            "showNotifications": true, "centerTime": 1000, "homeEnabled": true,
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
@@ -826,6 +827,7 @@ function buildAxisGroup(card, axis){
     freqRow = uiSetting(group, "Frequency", "Full cycles per second.",
         uiRange('autoHz' + axis, cfg.autoHz, {min: AUTO_HZ_MIN, max: AUTO_HZ_MAX, step: 0.05, format: hzFormat}, null,
                 function(v){ cfg.autoHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.auto || !!cfg.link});
+    if(axis === "L0"){ buildIdleRows(group, cfg, hzFormat); }
     var speedRow;
     uiSetting(group, "Speed limit", "Cap how fast this axis moves. Faster moves are shortened so they stay in sync with the video.",
         uiSwitch('speedLimit' + axis, cfg.speedLimit, function(v){ cfg.speedLimit = v; speedRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
@@ -856,6 +858,25 @@ function buildAxisGroup(card, axis){
         if(auto){ homeRange.set(getCenter(axis)); }
     }
     syncHome();
+}
+
+// Idle motion settings, on the stroke axis only.
+function buildIdleRows(group, cfg, hzFormat){
+    var speedRow, strokeRow;
+    var sync = function(){ speedRow.classList.toggle('disabled', !cfg.idle); strokeRow.classList.toggle('disabled', !cfg.idle); };
+    uiSetting(group, "Idle motion", "Keep a slow stroke going while no video is playing, like when you're picking what to watch next.",
+        uiSwitch('idleL0', cfg.idle, function(v){
+            cfg.idle = v;
+            sync();
+            saveSettings();
+            if(!v && serialConnected){ centerAxis("L0"); } // stop at home rather than mid-stroke
+        }), {sub: true});
+    speedRow = uiSetting(group, "Idle speed", "Full strokes per second. Slow is the idea.",
+        uiRange('idleHzL0', cfg.idleHz, {min: IDLE_HZ_MIN, max: IDLE_HZ_MAX, step: 0.05, format: hzFormat}, null,
+                function(v){ cfg.idleHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.idle});
+    strokeRow = uiSetting(group, "Idle stroke", "How much of the range idle strokes use, centred in it.",
+        uiRange('idleRangeL0', cfg.idleRange, {min: IDLE_RANGE_MIN, max: 100, step: 5, format: function(v){ return v + "%"; }}, null,
+                function(v){ cfg.idleRange = v; saveSettings(); }).el, {sub: true, disabled: !cfg.idle});
 }
 
 // ---- Advanced tab ----
@@ -2134,6 +2155,29 @@ function computeAllowance(now, sceneMs){
     return res;
 }
 
+// The allowance motion actually uses. `a` changes in steps: with each heart-rate reading
+// (about one a second) inside the approach band, and all at once when an edge starts or
+// clears. Applied straight, every shaped axis jumped within a single tick, which a slow
+// twist showed as a stutter after each edge. So motion follows `a` at a capped rate: up
+// gently, down faster so backing off at the edge stays prompt. Losing the monitor's
+// signal still stops at once.
+var A_RISE_PER_SEC = 0.3;
+var A_FALL_PER_SEC = 0.8;
+
+function smoothAllowance(prev, target, dtMs){
+    if(prev == null){ return target; }
+    var step = Math.max(0, dtMs) / 1000;
+    if(target > prev){ return Math.min(target, prev + A_RISE_PER_SEC * step); }
+    return Math.max(target, prev - A_FALL_PER_SEC * step);
+}
+
+var motionA = null, motionAAt = 0;
+function motionAllowance(gov, now){
+    motionA = gov.phase === 'NO SIGNAL' ? 0 : smoothAllowance(motionA, gov.a, now - motionAAt);
+    motionAAt = now;
+    return motionA;
+}
+
 // Scale one funscript position (0-100, after invert) by the allowance. Stroke shortens
 // from the bottom of its range; every other axis shrinks toward its home position.
 function shapePosition(axis, pos, a){
@@ -2216,6 +2260,60 @@ function autoMotion(axis, ms, jumped, a){
     var interval = fresh ? SINE_REJOIN_MS : SINE_STEP_MS;
     ax.sineDue = ms + interval;
     emitAxisMove(axis, sinePosition(settings.axes[axis].autoHz, ms + interval, AXIS_LIST.indexOf(axis)), interval, a);
+}
+
+// --- IDLE MOTION ---
+// With idle motion on, L0 keeps a slow stroke going whenever no video is playing:
+// browsing for the next scene, on another page, or paused. It starts a moment after
+// playback stops and gives way as soon as a video plays. It runs on wall-clock time and
+// goes through the same range, invert, heart-rate shaping and speed limit as playback,
+// so it stops at an edge like any other motion.
+
+var IDLE_DELAY_MS = 2000;   // wait this long after playback stops
+var IDLE_HZ_MIN = 0.05;
+var IDLE_HZ_MAX = 1;
+var IDLE_RANGE_MIN = 10;
+var idleDue = null;         // when the next idle move goes out; null while idle motion is off
+var idleTickAt = null;      // when the idle loop last ran
+var lastPlayingAt = 0;
+
+// Idle stroke position (0-100) at tMs: rangePct of the stroke, centred in the axis range.
+function idlePosition(hz, tMs, rangePct){
+    hz = Math.max(IDLE_HZ_MIN, Math.min(IDLE_HZ_MAX, Number(hz) || 0.2));
+    var half = Math.max(IDLE_RANGE_MIN, Math.min(100, Number(rangePct) || 100)) / 2;
+    return 50 + half * Math.sin(2 * Math.PI * hz * tMs / 1000);
+}
+
+function idleWanted(s){
+    return !!(s.connected && s.enabled && s.idle && !s.playing && s.sincePlayingMs >= IDLE_DELAY_MS);
+}
+
+function idleTick(){
+    var now = Date.now();
+    // A browser runs a hidden tab's timers about once a second; each move then covers the
+    // real gap, so the stroke stays smooth instead of darting and waiting.
+    var gap = idleTickAt == null ? SINE_STEP_MS : Math.max(SINE_STEP_MS, Math.min(1000, now - idleTickAt));
+    idleTickAt = now;
+    var playing = !!(boundPlayer && boundPlayer.isConnected && !boundPlayer.paused);
+    if(playing){ lastPlayingAt = now; }
+    var cfg = settings.axes.L0;
+    if(!idleWanted({ connected: serialConnected, enabled: cfg.enabled, idle: cfg.idle, playing: playing, sincePlayingMs: now - lastPlayingAt })){
+        idleDue = null;
+        return;
+    }
+    // Off a scene page the axes aren't set up yet: take L0's saved range.
+    initAxis("L0");
+    if(AXIS.L0.limits == null){ AXIS.L0.limits = getLimit("L0", BOTH).slice(0); }
+    if(idleDue != null && now < idleDue){ return; }
+    var interval = idleDue == null ? SINE_REJOIN_MS : gap; // first move: slow, from wherever it is
+    idleDue = now + interval;
+    var gov = lastGov = computeAllowance(now, null);
+    emitAxisMove("L0", idlePosition(cfg.idleHz, now + interval, cfg.idleRange), interval, motionAllowance(gov, now));
+    move();
+}
+
+function startIdleMotion(){
+    setInterval(idleTick, 25);
 }
 
 // --- LINKED AXES ---
@@ -2395,14 +2493,16 @@ function currentAction(ms){
         // This no longer depends on the "seeking" event firing.
         var jumped = (lastActionMs === null) || (ms < lastActionMs) || (ms - lastActionMs > SEEK_THRESHOLD_MS);
         lastActionMs = ms;
-        var gov = lastGov = computeAllowance(Date.now(), ms);
+        var now = Date.now();
+        var gov = lastGov = computeAllowance(now, ms);
+        var a = motionAllowance(gov, now);
         tickMoves = {};
         for(var x in AXIS){
             if(!settings.axes[x].enabled || AXIS[x].limits == null){ continue; }
             if(AXIS[x].acts == null){
                 // No script for this axis in this scene: it follows another axis if linked
                 // (emitLinkedMoves, below), otherwise auto motion fills in if it's on.
-                if(!settings.axes[x].link && settings.axes[x].auto){ autoMotion(x, ms, jumped, gov.a); }
+                if(!settings.axes[x].link && settings.axes[x].auto){ autoMotion(x, ms, jumped, a); }
                 continue;
             }
             // Following with "Override script": ignore this axis's own script entirely.
@@ -2419,14 +2519,14 @@ function currentAction(ms){
             if(AXIS[x].index == 0 || (prev && prev.at < ms)){
                 for(var i=AXIS[x].index;i<AXIS[x].acts.length;i++){
                     if(AXIS[x].acts[i] && AXIS[x].acts[i].at > ms){
-                        emitAxisMove(x, AXIS[x].acts[i].pos, AXIS[x].acts[i].at - ms, gov.a);
+                        emitAxisMove(x, AXIS[x].acts[i].pos, AXIS[x].acts[i].at - ms, a);
                         AXIS[x].index = ++i;
                         break;
                     }
                 }
             }
         }
-        emitLinkedMoves(gov.a);
+        emitLinkedMoves(a);
         move();
     }catch(e){
         // Without this, a throw left msPending stuck true and every later call
@@ -2764,6 +2864,7 @@ async function start(){
     startClimaxPolling();
     startPlayerWatch();
     startHud();
+    startIdleMotion();
     watchPageChanges();
 }
 
