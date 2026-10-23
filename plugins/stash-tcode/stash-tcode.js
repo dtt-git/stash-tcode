@@ -206,6 +206,7 @@ var STASH = { bg: "#202b33", card: "#30404d", input: "#394b59", accent: "#137cbd
               muted: "#bfccd6", success: "#0f9960", warning: "#d9822b", danger: "#db3737" };
 
 function injectUiStyles(){
+    injectNavStyles(); // the status dot's style
     if(document.getElementById('tcode-ui-styles')){ return; }
     var s = document.createElement('style');
     s.id = 'tcode-ui-styles';
@@ -234,9 +235,7 @@ function injectUiStyles(){
 #tcode-modal .tcode-version { color: ${STASH.muted}; font-size: .8rem; }
 #tcode-modal .tcode-number { width: 90px; text-align: right; display: inline-block; }
 #tcode-modal .tcode-suffix { margin-left: .4rem; color: ${STASH.muted}; }
-#tcode-modal .tcode-status { display: inline-flex; align-items: center; gap: .4rem; }
-#tcode-modal .tcode-dot { width: 8px; height: 8px; border-radius: 50%; background: ${STASH.danger}; display: inline-block; }
-#tcode-modal .tcode-dot.on { background: ${STASH.success}; }
+#tcode-modal .tcode-status { white-space: nowrap; } /* the dot itself is styled in injectNavStyles */
 #tcode-modal .tcode-list { margin: .25rem 0 0; padding-left: 1.1rem; color: ${STASH.muted}; }
 
 /* Range sliders: thin track in the input colour, accent fill, light thumb. */
@@ -430,20 +429,22 @@ function showToast(title, message, type = 'info', duration = 4000) {
 
 // --- NAVBAR BUTTON (appended to the very end of the Donate/Stats/Settings/Help cluster) ---
 
-// Persistent styles for the status dot. Added once; unlike the settings stylesheet
-// this must NOT be torn down when the menu closes.
+// Persistent styles for the nav button and the status dot. Added once; unlike the settings
+// stylesheet this must NOT be torn down when the menu closes.
 function injectNavStyles(){
     if(document.getElementById('tcode-nav-styles')){ return; }
     var s = document.createElement('style');
     s.id = 'tcode-nav-styles';
+    // One status dot for the navbar and the settings dialog. vertical-align: middle centres it
+    // on the lowercase letters beside it; centring on the line box puts it visibly higher.
     s.textContent = `
-        #tcode-nav-btn { display: flex; align-items: center; }
-        #tcode-nav-btn .tcode-nav-dot {
-            display: inline-block; width: 8px; height: 8px; border-radius: 50%;
-            margin-right: 6px; flex-shrink: 0; background: #db3737;
-            transition: background 0.2s ease;
+        .tcode-dot {
+            display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
+            vertical-align: middle; background: ${STASH.danger}; transition: background 0.2s ease;
         }
-        #tcode-nav-btn.connected .tcode-nav-dot { background: #0f9960; }
+        .tcode-dot.on { background: ${STASH.success}; }
+        #tcode-nav-btn { display: flex; align-items: center; }
+        #tcode-nav-btn .tcode-nav-status { white-space: nowrap; }
         #tcode-nav-btn .tcode-nav-hr { margin-left: 8px; font-variant-numeric: tabular-nums; }
         #tcode-nav-btn .tcode-nav-heart { color: #ff7373; margin-right: 3px; }
     `;
@@ -456,12 +457,11 @@ function updateNavButton(){
     var btn = document.getElementById('tcode-nav-btn');
     if(!btn){ return; }
     var labelText = btn.querySelector('.tcode-nav-label-text');
+    btn.querySelector('.tcode-dot').classList.toggle('on', serialConnected);
     if(serialConnected){
-        btn.classList.add('connected');
         btn.title = "TCode: Connected — click for settings";
         if(labelText){ labelText.textContent = "Connected"; }
     }else{
-        btn.classList.remove('connected');
         btn.title = "TCode: Not connected — click for settings";
         if(labelText){ labelText.textContent = "Connect"; }
     }
@@ -475,8 +475,9 @@ function createNavButton(){
     // Match the Stats/Settings button classes (flex + vertically centered) plus Stash's
     // own nav-utility styling, so it sits flush with its neighbors.
     btn.className = 'nav-utility minimal d-flex align-items-center h-100 btn btn-primary';
-    btn.innerHTML = '<span class="tcode-nav-dot"></span>' +
-        '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span>' +
+    // The dot and label share one line of text, so the dot can line up with the letters.
+    btn.innerHTML = '<span class="tcode-nav-status"><span class="tcode-dot"></span>' +
+        '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span></span>' +
         '<span class="tcode-nav-hr" style="display: none"><span class="tcode-nav-heart">♥</span><span class="tcode-nav-bpm"></span></span>';
     btn.addEventListener('click', function(){ toggleMenu(); });
     return btn;
