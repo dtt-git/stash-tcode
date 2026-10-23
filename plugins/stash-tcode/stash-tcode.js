@@ -260,6 +260,15 @@ function injectUiStyles(){
 .tcode-range.dual input[type=range].upper::-webkit-slider-runnable-track { background: transparent; }
 .tcode-range output { min-width: 10.5em; text-align: right; font-variant-numeric: tabular-nums; color: ${STASH.text}; font-size: .9rem; }
 
+/* Phones: a 360px slider beside its label squeezed the label to a letter per line. Let a
+   control drop below its label when both don't fit, and let sliders shrink to the row. */
+@media (max-width: 575.98px) {
+    #tcode-modal .setting, #tcode-modal .setting-group .setting { flex-wrap: wrap; row-gap: .5rem; }
+    #tcode-modal .setting > div:first-child { flex: 1 1 8rem; }
+    #tcode-modal .setting > div:last-child { flex: 0 1 auto; max-width: 100%; }
+    .tcode-range output { min-width: 0; }
+}
+
 /* Toasts, in Stash's secondary colour with a coloured edge per type. */
 #tcode-toasts { position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%); z-index: 1080;
                 display: flex; flex-direction: column-reverse; gap: .5rem; pointer-events: none; width: 360px; max-width: calc(100vw - 32px); }
@@ -435,12 +444,13 @@ function injectNavStyles(){
     if(document.getElementById('tcode-nav-styles')){ return; }
     var s = document.createElement('style');
     s.id = 'tcode-nav-styles';
-    // One status dot for the navbar and the settings dialog. vertical-align: middle centres it
-    // on the lowercase letters beside it; centring on the line box puts it visibly higher.
+    // One status dot for the navbar and the settings dialog, centred on the height of a capital
+    // letter (about .71em in Stash's font), so it lines up with "Connected", the heart and the
+    // BPM digits. Raising its bottom edge by half that, less half the dot, does it.
     s.textContent = `
         .tcode-dot {
             display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
-            vertical-align: middle; background: ${STASH.danger}; transition: background 0.2s ease;
+            vertical-align: calc(.355em - 4px); background: ${STASH.danger}; transition: background 0.2s ease;
         }
         .tcode-dot.on { background: ${STASH.success}; }
         #tcode-nav-btn { display: flex; align-items: center; }
