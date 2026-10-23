@@ -69,9 +69,18 @@ Stash-TCode is tested on Stash v0.31.
 3. Click **Connect** in the navbar, then pick your device's serial port.
    After that first time it reconnects by itself.
 
-It works on whatever address you reach Stash at (port, reverse proxy or LAN name). Settings are saved
-in the browser, like the device permissions they go with. When there's a new version, it shows under
-**Settings → Plugins → Installed Plugins → Check for updates**.
+It works on whatever address you reach Stash at (port, reverse proxy or LAN name). When there's a new
+version, it shows under **Settings → Plugins → Installed Plugins → Check for updates**.
+
+### Where settings are saved
+
+By default each browser keeps its own settings. To share them, turn on **Advanced → Save settings to
+Stash**: every browser on that Stash then uses the same settings, private windows included, and a change
+in one shows up in the others the next time they load. Turning it off in any browser turns it off for all
+of them, and each keeps the settings it had.
+
+Which serial device and heart-rate monitor to reconnect to always stays with each browser, as the
+browser's permission to use them does. In a private window you pick the device again each time.
 
 To install by hand instead, copy the [`plugins/stash-tcode`](plugins/stash-tcode) folder into your
 Stash plugins directory, then **Reload plugins** in Stash and refresh.

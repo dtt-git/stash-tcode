@@ -7,6 +7,7 @@
 
 // --- HOST ---
 const TCODE_VERSION = '0.7.0'; // keep in step with version: in stash-tcode.yml
+const PLUGIN_ID = 'stash-tcode';
 const STORE_PREFIX = 'stash-tcode:';
 // Settings the retired Tampermonkey userscript leaves here when it finds this plugin installed.
 const HANDOFF_KEY = STORE_PREFIX + 'userscript-settings';
@@ -123,17 +124,92 @@ function persistLimitsSoon(){
                 settings.axes[ax].limits = [AXIS[ax].limits[0], AXIS[ax].limits[1]];
             }
         }
-        storeSet("settings", settings);
+        saveSettings();
         debug("[TCode] Persisted axis ranges to storage");
     }, 300);
 }
 
 function saveSettings(){
     storeSet("settings", settings);
+    if(settings.saveToStash){ saveToStashSoon(); }
     publishDebugApi();
 }
 
-function loadSettings(){
+// --- SETTINGS IN STASH ---
+// With "Save settings to Stash" on, the settings also live in Stash's plugin configuration, so
+// every browser gets them, private windows included. Which serial port and heart-rate monitor
+// to reopen stays with each browser, like the browser's permission to use them.
+
+// The settings every browser shares: all but the per-browser ones.
+function sharedSettings(){
+    var copy = JSON.parse(JSON.stringify(settings));
+    for(const k of ["serialPort", "knownAxes", "saveToStash", "currentVersion", "importedUserscript"]){ delete copy[k]; }
+    delete copy.hr.deviceId; delete copy.hr.deviceName;
+    return copy;
+}
+
+// Write the shared settings to Stash, or clear them there when saving to Stash is off.
+// keepalive lets the request finish while the page is closing (too late to check first, as
+// syncChangeToStash does; that only matters for a change made in the last moment anyway).
+function writeStashSettings(keepalive){
+    clearTimeout(stashSaveTimer); stashSaveTimer = null;
+    var input = settings.saveToStash ? { saveToStash: true, settings: JSON.stringify(sharedSettings()) } : {};
+    return stashGql("mutation($id: ID!, $input: Map!){ configurePlugin(plugin_id: $id, input: $input) }",
+                    { id: PLUGIN_ID, input: input }, keepalive)
+        .catch(function(e){ showToast("Couldn't save settings to Stash", e.message, "error"); throw e; });
+}
+
+// A change saved from any tab. A tab that was already open doesn't hear that saving to Stash
+// was turned off elsewhere, so check first; otherwise its next change would turn it back on.
+async function syncChangeToStash(){
+    stashSaveTimer = null;
+    try {
+        var data = await stashGql("{ configuration { plugins } }");
+        var cfg = (data.configuration.plugins || {})[PLUGIN_ID];
+        if(!cfg || !cfg.saveToStash){
+            settings.saveToStash = false;
+            storeSet("settings", settings);
+            showToast("Settings kept in this browser", "Saving to Stash was turned off in another browser.", "info");
+            return;
+        }
+    } catch(e) { debug("[TCode] Couldn't check Stash's settings: " + e.message); return; }
+    writeStashSettings().catch(function(){});
+}
+
+var stashSaveTimer = null;
+function saveToStashSoon(){
+    clearTimeout(stashSaveTimer);
+    stashSaveTimer = setTimeout(syncChangeToStash, 300);
+}
+window.addEventListener('pagehide', function(){ if(stashSaveTimer){ writeStashSettings(true).catch(function(){}); } });
+
+// At startup: if this Stash has saved settings, use them, keeping this browser's own device
+// and monitor. If saving to Stash was turned off elsewhere, this browser stops too.
+async function loadStashSettings(){
+    var cfg;
+    try {
+        var data = await stashGql("{ configuration { plugins } }");
+        cfg = (data.configuration.plugins || {})[PLUGIN_ID];
+    } catch(e) { debug("[TCode] Couldn't read settings from Stash: " + e.message); return; }
+    if(!cfg || !cfg.saveToStash || typeof cfg.settings !== 'string'){
+        if(settings.saveToStash){ settings.saveToStash = false; storeSet("settings", settings); }
+        return;
+    }
+    var stored;
+    try { stored = JSON.parse(cfg.settings); }
+    catch(e) { console.error("[TCode] Settings saved in Stash aren't valid JSON:", e); return; }
+    var own = { serialPort: settings.serialPort, knownAxes: settings.knownAxes,
+                deviceId: settings.hr.deviceId, deviceName: settings.hr.deviceName };
+    loadSettings(stored);
+    settings.serialPort = own.serialPort; settings.knownAxes = own.knownAxes;
+    settings.hr.deviceId = own.deviceId; settings.hr.deviceName = own.deviceName;
+    settings.saveToStash = true;
+    storeSet("settings", settings);
+    debug("[TCode] Using the settings saved in Stash");
+}
+
+// Settings from `stored` (or this browser's storage), upgraded and with defaults filled in.
+function loadSettings(stored){
     var thisVersion = TCODE_VERSION;
     var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5,
                                                   speedLimit: false, maxSpeed: 5, link: "", linkOverride: false}; };
@@ -146,8 +222,7 @@ function loadSettings(){
                                    decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105,
                                    climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15, climaxTag: "Climax" },
                            "currentVersion": thisVersion};
-    settings = storeGet("settings", null);
-    settings = importUserscriptSettings(settings);
+    settings = stored !== undefined ? stored : importUserscriptSettings(storeGet("settings", null));
     if(settings == null){ settings = defaultSettings; }
     handleUpgrade(thisVersion);
     // "Climax HR" was renamed "Edge HR": it's where an edge is called, not a climax.
@@ -786,6 +861,17 @@ function buildAxisGroup(card, axis){
 // ---- Advanced tab ----
 function buildAdvancedTab(body){
     var card = uiSection(body, "Advanced");
+    uiSetting(card, "Save settings to Stash",
+        "Keep these settings in Stash, so every browser uses them, private windows included. Off keeps them in this browser only. " +
+        "Which device and heart-rate monitor to reconnect to always stays with each browser.",
+        uiSwitch('saveToStash', !!settings.saveToStash, function(v){
+            settings.saveToStash = v;
+            storeSet("settings", settings);
+            writeStashSettings().then(function(){
+                showToast(v ? "Settings saved to Stash" : "Settings kept in this browser",
+                          v ? "Every browser on this Stash now uses them." : "They're no longer saved in Stash.", "success");
+            }).catch(function(){});
+        }));
     uiSetting(card, "Stats overlay", "Heart rate, ceiling, edges and the current phase over the video, while a monitor is connected or modulation is on.",
         uiSwitch('showHud', settings.showHud !== false, function(v){ settings.showHud = v; saveSettings(); updateHud(); }));
     uiSetting(card, "Notifications", "Show pop-ups for connections and script loading.",
@@ -1552,10 +1638,12 @@ function defaultFunscriptUrl(){
 // --- STASH GRAPHQL ---
 // A plain same-origin fetch: the browser attaches Stash's session cookie, which is
 // HttpOnly (invisible to document.cookie), so this also works when Stash has a login.
-function stashGql(query, variables){
+// keepalive lets a request sent while the page closes still finish.
+function stashGql(query, variables, keepalive){
     return fetch(location.origin + '/graphql', {
         method: 'POST',
         credentials: 'same-origin',
+        keepalive: !!keepalive,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: query, variables: variables || {} })
     }).then(function(r){
@@ -2667,9 +2755,10 @@ function onPageChange(){
     }
 }
 
-function start(){
+async function start(){
+    startNavButton(); // first: the navbar patch must be in before Stash draws the navbar
+    await loadStashSettings(); // before anything reads the settings
     publishDebugApi();
-    startNavButton();
     startSerialAutoConnect();
     autoConnectHr();
     startClimaxPolling();
