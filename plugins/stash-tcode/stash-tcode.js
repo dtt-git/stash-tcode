@@ -6,7 +6,7 @@
 (function(){
 
 // --- HOST ---
-const TCODE_VERSION = '0.7.0'; // keep in step with version: in stash-tcode.yml
+const TCODE_VERSION = '1.0.0'; // keep in step with version: in stash-tcode.yml
 const PLUGIN_ID = 'stash-tcode';
 const STORE_PREFIX = 'stash-tcode:';
 // Settings the retired Tampermonkey userscript leaves here when it finds this plugin installed.
