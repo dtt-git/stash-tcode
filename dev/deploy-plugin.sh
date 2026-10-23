@@ -1,7 +1,6 @@
 #!/bin/bash
-# Copies the plugin into a local Stash for testing: the manifest plus the userscript, which
-# is the plugin's script too. Then in Stash: Settings -> Plugins -> Reload plugins, and
-# refresh the page.
+# Copies the plugin into a local Stash for testing. Then in Stash: Settings -> Plugins ->
+# Reload plugins, and refresh the page.
 #
 # Usage: STASH_PLUGINS_DIR=/path/to/stash/plugins dev/deploy-plugin.sh
 # (or put STASH_PLUGINS_DIR=... in a .env file at the repo root)
@@ -17,5 +16,5 @@ fi
 
 dest="$STASH_PLUGINS_DIR/stash-tcode"
 mkdir -p "$dest"
-cp plugins/stash-tcode/stash-tcode.yml stash-tcode.user.js "$dest"/
+cp plugins/stash-tcode/* "$dest"/
 echo "Copied to $dest"

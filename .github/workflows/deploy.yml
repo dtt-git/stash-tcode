@@ -4,7 +4,6 @@ on:
   push:
     paths:
       - 'plugins/**'
-      - 'stash-tcode.user.js'
       - 'build_site.sh'
     branches:
       - main

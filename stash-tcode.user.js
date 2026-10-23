@@ -15,6 +15,10 @@
 // @downloadURL  https://raw.githubusercontent.com/dtt-git/stash-tcode/main/stash-tcode.user.js
 // ==/UserScript==
 
+// The last userscript release. Stash-TCode is now a Stash plugin (plugins/stash-tcode/), and this
+// file stays at 0.7.0: Tampermonkey installs update to it, then get nothing further. It tells
+// them so, and hands its settings to the plugin once that's installed.
+
 // Wrapped so that, loaded as a Stash plugin, none of this lands in the page's globals.
 (function(){
 
@@ -24,6 +28,7 @@
 const IS_USERSCRIPT = typeof GM_getValue === 'function';
 const TCODE_VERSION = '0.7.0'; // keep in step with @version above and plugins/stash-tcode/stash-tcode.yml
 const PLUGIN_ID = 'stash-tcode';
+const README_URL = 'https://github.com/dtt-git/stash-tcode#install';
 // The page's own window, where Stash's PluginApi lives. A userscript reaches it through unsafeWindow.
 const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 const STORE_PREFIX = 'stash-tcode:';
@@ -2702,10 +2707,21 @@ function onPageChange(){
     }
 }
 
+// Tell a userscript user, once, that the userscript is retired. It keeps working.
+function noticeRetired(){
+    console.log("[TCode] This userscript gets no more updates. Stash-TCode is now a Stash plugin: " + README_URL);
+    if(storeGet("retiredNoticeShown", false) || !settings.showNotifications){ return; }
+    storeSet("retiredNoticeShown", true);
+    showToast("Stash-TCode is now a Stash plugin",
+              "This userscript won't get more updates. Install the plugin from Stash's plugin list " +
+              "(see " + README_URL + "); your settings move over.", "info", 20000);
+}
+
 // A userscript first checks whether the plugin is on this Stash; if it is, the userscript
 // hands over and stays out of the way.
 async function start(){
     if(IS_USERSCRIPT && await pluginEnabled()){ handOffToPlugin(); return; }
+    if(IS_USERSCRIPT){ noticeRetired(); }
     publishDebugApi();
     startNavButton();
     startSerialAutoConnect();

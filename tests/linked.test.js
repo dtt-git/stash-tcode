@@ -1,7 +1,7 @@
 // Tests for linked axes (one axis following another). Run: node tests/linked.test.js
 const fs = require('fs');
 const path = require('path');
-const src = fs.readFileSync(path.join(__dirname, '..', 'stash-tcode.user.js'), 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '..', 'plugins', 'stash-tcode', 'stash-tcode.js'), 'utf8');
 const section = src.slice(src.indexOf('// --- LINKED AXES ---'), src.indexOf('// --- SPEED LIMIT ---'));
 
 // Fresh world per test: every axis enabled with no script; ranges and links per test.

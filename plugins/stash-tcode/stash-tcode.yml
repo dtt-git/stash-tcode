@@ -3,7 +3,5 @@ description: Drive TCode devices (OSR2/SR6) from Stash over USB Web Serial, with
 version: 0.7.0
 url: https://github.com/dtt-git/stash-tcode
 ui:
-  # The script lives at the repo root, where Tampermonkey installs also update from.
-  # build_site.sh copies it in next to this file when packaging the plugin.
   javascript:
-    - stash-tcode.user.js
+    - stash-tcode.js

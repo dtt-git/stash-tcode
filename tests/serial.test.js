@@ -1,7 +1,7 @@
 // Tests for choosing which granted serial port to reopen. Run: node tests/serial.test.js
 const fs = require('fs');
 const path = require('path');
-const src = fs.readFileSync(path.join(__dirname, '..', 'stash-tcode.user.js'), 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '..', 'plugins', 'stash-tcode', 'stash-tcode.js'), 'utf8');
 const start = src.indexOf('function pickSavedPort(');
 const body = src.slice(start, src.indexOf('\n}', start) + 2);
 const pick = (saved, ports) => new Function('settings', body + '\nreturn pickSavedPort;')({ serialPort: saved })(ports);
