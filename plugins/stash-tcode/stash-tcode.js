@@ -871,7 +871,7 @@ function buildIdleRows(group, cfg, hzFormat){
             saveSettings();
             if(!v && serialConnected){ centerAxis("L0"); } // stop at home rather than mid-stroke
         }), {sub: true});
-    speedRow = uiSetting(group, "Idle speed", "Full strokes per second. Slow is the idea.",
+    speedRow = uiSetting(group, "Idle speed", "Full strokes per second.",
         uiRange('idleHzL0', cfg.idleHz, {min: IDLE_HZ_MIN, max: IDLE_HZ_MAX, step: 0.05, format: hzFormat}, null,
                 function(v){ cfg.idleHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.idle});
     strokeRow = uiSetting(group, "Idle stroke", "How much of the range idle strokes use, centred in it.",
