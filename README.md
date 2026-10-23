@@ -21,7 +21,7 @@ Maintained by **dtt**. Originally based on Stash-TCode by Spunkle, with modifica
 - Auto motion: any axis the scene has no script for can follow a smooth sine wave at its own
   frequency, so a video without a funscript still gets motion.
 - Idle motion: the stroke axis can keep a slow stroke going whenever no video is playing, while
-  you browse for the next scene or with the video paused. Speed and stroke length are adjustable
+  you browse for the next scene or with the video paused. Speed (3-60 strokes a minute) and stroke length are adjustable
   (**Axes → L0 → Idle motion**). It starts 2 s after playback stops and gives way the moment a video plays.
 - Linked axes: an axis can **follow** another, e.g. twist mirroring stroke: when stroke goes
   0-100%, twist goes 0-100% of its own range, in step. Use the follower's Invert to reverse it.

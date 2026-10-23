@@ -827,7 +827,7 @@ function buildAxisGroup(card, axis){
     freqRow = uiSetting(group, "Frequency", "Full cycles per second.",
         uiRange('autoHz' + axis, cfg.autoHz, {min: AUTO_HZ_MIN, max: AUTO_HZ_MAX, step: 0.05, format: hzFormat}, null,
                 function(v){ cfg.autoHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.auto || !!cfg.link});
-    if(axis === "L0"){ buildIdleRows(group, cfg, hzFormat); }
+    if(axis === "L0"){ buildIdleRows(group, cfg); }
     var speedRow;
     uiSetting(group, "Speed limit", "Cap how fast this axis moves. Faster moves are shortened so they stay in sync with the video.",
         uiSwitch('speedLimit' + axis, cfg.speedLimit, function(v){ cfg.speedLimit = v; speedRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
@@ -861,7 +861,7 @@ function buildAxisGroup(card, axis){
 }
 
 // Idle motion settings, on the stroke axis only.
-function buildIdleRows(group, cfg, hzFormat){
+function buildIdleRows(group, cfg){
     var speedRow, strokeRow;
     var sync = function(){ speedRow.classList.toggle('disabled', !cfg.idle); strokeRow.classList.toggle('disabled', !cfg.idle); };
     uiSetting(group, "Idle motion", "Keep a slow stroke going while no video is playing, like when you're picking what to watch next.",
@@ -871,8 +871,10 @@ function buildIdleRows(group, cfg, hzFormat){
             saveSettings();
             if(!v && serialConnected){ centerAxis("L0"); } // stop at home rather than mid-stroke
         }), {sub: true});
-    speedRow = uiSetting(group, "Idle speed", "Full strokes per second.",
-        uiRange('idleHzL0', cfg.idleHz, {min: IDLE_HZ_MIN, max: IDLE_HZ_MAX, step: 0.05, format: hzFormat}, null,
+    // Stored in Hz like auto motion, but idle strokes are slow, so shown per minute.
+    var perMinute = function(v){ return Math.round(v * 60) + " strokes/min"; };
+    speedRow = uiSetting(group, "Idle speed", "Full strokes per minute.",
+        uiRange('idleHzL0', cfg.idleHz, {min: IDLE_HZ_MIN, max: IDLE_HZ_MAX, step: 0.05, format: perMinute}, null,
                 function(v){ cfg.idleHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.idle});
     strokeRow = uiSetting(group, "Idle stroke", "How much of the range idle strokes use, centred in it.",
         uiRange('idleRangeL0', cfg.idleRange, {min: IDLE_RANGE_MIN, max: 100, step: 5, format: function(v){ return v + "%"; }}, null,
