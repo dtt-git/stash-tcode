@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         Stash-TCode
 // @namespace    https://github.com/dtt-git/stash-tcode
-// @version      0.6.0
+// @version      0.7.0
 // @description  Drive TCode devices from Stash over USB Web Serial, with optional heart-rate modulation
 // @author       dtt (originally by Steel, modded by Spunkle)
 // @include      /^https?:\/\/[^\/?#]+:9999\//
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @grant        GM_info
 // @grant        unsafeWindow
 // @license      GPLv3
 // @homepageURL  https://github.com/dtt-git/stash-tcode
@@ -15,6 +14,77 @@
 // @updateURL    https://raw.githubusercontent.com/dtt-git/stash-tcode/main/stash-tcode.user.js
 // @downloadURL  https://raw.githubusercontent.com/dtt-git/stash-tcode/main/stash-tcode.user.js
 // ==/UserScript==
+
+// Wrapped so that, loaded as a Stash plugin, none of this lands in the page's globals.
+(function(){
+
+// --- HOST ---
+// This one file runs two ways: as a Stash UI plugin (Stash loads it into the page) and as a
+// Tampermonkey userscript. Only the userscript gets the GM_* functions.
+const IS_USERSCRIPT = typeof GM_getValue === 'function';
+const TCODE_VERSION = '0.7.0'; // keep in step with @version above and plugins/stash-tcode/stash-tcode.yml
+const PLUGIN_ID = 'stash-tcode';
+// The page's own window, where Stash's PluginApi lives. A userscript reaches it through unsafeWindow.
+const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+const STORE_PREFIX = 'stash-tcode:';
+// Settings a userscript install hands over to the plugin on the same Stash (see handOffToPlugin).
+const HANDOFF_KEY = STORE_PREFIX + 'userscript-settings';
+
+// Saved values: Tampermonkey's storage for the userscript, localStorage for the plugin.
+// Both are per browser, like the serial and Bluetooth permissions the settings refer to.
+function storeGet(key, fallback){
+    if(IS_USERSCRIPT){ return GM_getValue(key, fallback); }
+    try {
+        var raw = localStorage.getItem(STORE_PREFIX + key);
+        return raw == null ? fallback : JSON.parse(raw);
+    } catch(e) { return fallback; }
+}
+
+function storeSet(key, value){
+    if(IS_USERSCRIPT){ GM_setValue(key, value); return; }
+    try { localStorage.setItem(STORE_PREFIX + key, JSON.stringify(value)); }
+    catch(e) { console.error("[TCode] Couldn't save settings:", e); }
+}
+
+// Whether the Stash-TCode plugin is installed and enabled on this Stash.
+async function pluginEnabled(){
+    try {
+        var data = await stashGql("{ plugins { id enabled } }");
+        return (data.plugins || []).some(function(p){ return p.id === PLUGIN_ID && p.enabled; });
+    } catch(e) { return false; } // no answer: carry on as a userscript
+}
+
+// The userscript, finding the plugin installed, leaves its settings where the plugin will pick
+// them up and steps aside: two copies in one page would both drive the device.
+function handOffToPlugin(){
+    var copied = false;
+    try {
+        if(localStorage.getItem(HANDOFF_KEY) == null){
+            localStorage.setItem(HANDOFF_KEY, JSON.stringify(settings));
+            copied = true;
+        }
+    } catch(e) {}
+    console.log("[TCode] The Stash-TCode plugin is installed, so the userscript isn't running.");
+    showToast("Stash-TCode plugin installed",
+              (copied ? "Your settings were copied to the plugin and apply after a refresh. " : "") +
+              "Remove the Stash-TCode userscript from Tampermonkey: the plugin replaces it.", "warning", 15000);
+}
+
+// The plugin takes over settings a userscript handed over (see handOffToPlugin), once: they
+// hold the ranges and devices the user actually set up. Later changes made in the plugin stand.
+function importUserscriptSettings(own){
+    if(own && own.importedUserscript){ return own; }
+    try {
+        var raw = localStorage.getItem(HANDOFF_KEY);
+        if(raw == null){ return own; }
+        var handed = JSON.parse(raw);
+        handed.importedUserscript = true;
+        storeSet("settings", handed);
+        console.log("[TCode] Took over the userscript's settings");
+        return handed;
+    } catch(e) { return own; }
+}
+// ---------------------------------
 
 var video="";
 var lastPage = null;
@@ -84,11 +154,11 @@ function getLimit(axis, which=BOTH){
 
 function debug(text, value=""){
     if(settings.debug){
-        if(value == ""){ console.log(text); } else { unsafeWindow[value] = text; }
+        if(value == ""){ console.log(text); } else { pageWindow[value] = text; }
     }
 }
 
-// Persist current in-memory axis ranges to GM storage (debounced).
+// Persist current in-memory axis ranges to storage (debounced).
 // Called from setLimits() so scroll-wheel AND slider changes survive refresh.
 function persistLimitsSoon(){
     if(!limitsReady){ return; } // don't save until saved ranges have been restored on load
@@ -99,18 +169,18 @@ function persistLimitsSoon(){
                 settings.axes[ax].limits = [AXIS[ax].limits[0], AXIS[ax].limits[1]];
             }
         }
-        GM_setValue("settings", settings);
+        storeSet("settings", settings);
         debug("[TCode] Persisted axis ranges to storage");
     }, 300);
 }
 
 function saveSettings(){
-    GM_setValue("settings", settings);
+    storeSet("settings", settings);
     publishDebugApi();
 }
 
 function loadSettings(){
-    var thisVersion = GM_info.script.version;
+    var thisVersion = TCODE_VERSION;
     var axisDefaults = function(enabled){ return {enabled: enabled, invert: false, center: null, autoCenter: true, auto: false, autoHz: 0.5,
                                                   speedLimit: false, maxSpeed: 5, link: "", linkOverride: false}; };
     var defaultSettings = {"debug": false, "sync": 0, "autoConnect": true, "serialPort": null, "showHud": true, "knownAxes": [],
@@ -122,7 +192,9 @@ function loadSettings(){
                                    decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105,
                                    climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15, climaxTag: "Climax" },
                            "currentVersion": thisVersion};
-    settings = GM_getValue("settings", defaultSettings);
+    settings = storeGet("settings", null);
+    if(!IS_USERSCRIPT){ settings = importUserscriptSettings(settings); }
+    if(settings == null){ settings = defaultSettings; }
     handleUpgrade(thisVersion);
     // "Climax HR" was renamed "Edge HR": it's where an edge is called, not a climax.
     // Carry the old value over before defaults are filled in.
@@ -441,16 +513,8 @@ function updateNavButton(){
     }
 }
 
-// Append the button as the very last child of the Donate/Stats/Settings/Help cluster
-// (.navbar-buttons — distinct from the primary Scenes/Images/.../Tags nav-link list,
-// which is also, confusingly, classed .navbar-nav). No-op if already present, so the
-// keep-alive interval can call it freely.
-function injectNavButton(){
-    if(document.getElementById('tcode-nav-btn')){ return; }
-    var navButtons = document.querySelector('.navbar-buttons');
-    if(!navButtons){ return; } // navbar not rendered yet; the keep-alive will retry
+function createNavButton(){
     injectNavStyles();
-
     var btn = document.createElement('button');
     btn.id = 'tcode-nav-btn';
     btn.type = 'button';
@@ -461,15 +525,52 @@ function injectNavButton(){
         '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span>' +
         '<span class="tcode-nav-hr" style="display: none"><span class="tcode-nav-heart">♥</span><span class="tcode-nav-bpm"></span></span>';
     btn.addEventListener('click', function(){ toggleMenu(); });
+    return btn;
+}
 
-    navButtons.appendChild(btn); // very end of the cluster
+// Append the button as the very last child of the Donate/Stats/Settings/Help cluster
+// (.navbar-buttons — distinct from the primary Scenes/Images/.../Tags nav-link list,
+// which is also, confusingly, classed .navbar-nav). No-op if already present, so the
+// keep-alive interval can call it freely.
+function injectNavButton(){
+    if(document.getElementById('tcode-nav-btn')){ return; }
+    var navButtons = document.querySelector('.navbar-buttons');
+    if(!navButtons){ return; } // navbar not rendered yet; the keep-alive will retry
+    navButtons.appendChild(createNavButton()); // very end of the cluster
     updateNavButton();
     updateHrUi();
 }
 
-// Stash is a React SPA and re-renders the navbar on navigation, which can drop our button.
-// Re-inject on an interval (cheap; injectNavButton no-ops when the button is already there).
+// As a plugin, the button goes in through Stash's patchable navbar utility items, so React
+// keeps it in place across re-renders. Stash renders those items twice, in the collapsed
+// menu and in the .navbar-buttons cluster; the button goes in the cluster only.
+function patchNavButton(api){
+    var React = api.React;
+    function TcodeNavSlot(){
+        var ref = React.useRef(null);
+        React.useEffect(function(){
+            var slot = ref.current;
+            if(!slot || !slot.closest('.navbar-buttons') || document.getElementById('tcode-nav-btn')){ return; }
+            slot.appendChild(createNavButton());
+            updateNavButton();
+            updateHrUi();
+            return function(){ slot.textContent = ''; };
+        }, []);
+        return React.createElement('div', {ref: ref, className: 'tcode-nav-slot d-flex align-items-center'});
+    }
+    // Stash appends the rendered result after the call's args, and another plugin's before
+    // patch can change how many args there are, so the result is the last one.
+    api.patch.after("MainNavBar.UtilityItems", function(){
+        return React.createElement(React.Fragment, null, arguments[arguments.length - 1], React.createElement(TcodeNavSlot));
+    });
+}
+
 function startNavButton(){
+    var api = pageWindow.PluginApi;
+    // Stash loads plugins before it first draws the navbar, so the patch is in place in time.
+    if(!IS_USERSCRIPT && api && api.patch && api.React){ patchNavButton(api); return; }
+    // A userscript starts after the navbar is drawn, and Stash re-renders it on navigation,
+    // which can drop our button. Re-inject on an interval (cheap; a no-op while it's there).
     injectNavButton();
     setInterval(injectNavButton, 1000);
 }
@@ -513,7 +614,7 @@ function openSettings(){
                 ]),
                 el('div', {class: 'modal-body'}, [nav, body]),
                 el('div', {class: 'modal-footer'}, [
-                    el('span', {class: 'tcode-version', text: 'Stash-TCode ' + GM_info.script.version}),
+                    el('span', {class: 'tcode-version', text: 'Stash-TCode ' + TCODE_VERSION}),
                     uiButton('Close', 'secondary', closeSettings)
                 ])
             ])
@@ -877,7 +978,7 @@ async function openPort(p, silent) {
     try {
         var info = port.getInfo();
         settings.serialPort = { usbVendorId: info.usbVendorId ?? null, usbProductId: info.usbProductId ?? null };
-        GM_setValue("settings", settings);
+        storeSet("settings", settings);
     } catch (e) { debug("[TCode] getInfo failed: " + e); }
     debug("USB Serial Connected");
     showToast(silent ? "USB Reconnected" : "USB Connected", "Serial connection established at 115200 baud", "success");
@@ -1282,7 +1383,7 @@ function connectSimulatedDevice(){
 
 function publishDebugApi(){
     if(!settings.debug){ return; }
-    unsafeWindow.__tcode = {
+    pageWindow.__tcode = {
         // Axis commands as [{t, axis, pos, ms}], parsed from the TX log.
         commands: function(){
             var out = [];
@@ -1579,12 +1680,20 @@ async function markClimaxHere(){
     }
 }
 
+// Stash's video.js player for the current scene, or null. Stash hands it to plugins; on a
+// Stash without that, video.js also keeps it on its element (in the page's JavaScript world).
+function stashPlayer(){
+    var api = pageWindow.PluginApi;
+    var iu = api && api.utils && api.utils.InteractiveUtils;
+    if(iu && typeof iu.getPlayer === 'function'){ return iu.getPlayer() || null; }
+    var host = pageWindow.document.querySelector('.video-js');
+    return (host && host.player) || null;
+}
+
 // Jump the Stash player to a scene time. video.js takes scene time and copes with
-// transcoded streams, so go through it when it's reachable (it lives in the page's
-// JavaScript world, hence unsafeWindow); otherwise set the <video> directly.
+// transcoded streams, so go through it when it's reachable; otherwise set the <video> directly.
 function seekScene(seconds){
-    var host = unsafeWindow.document.querySelector('.video-js');
-    var vjs = host && host.player;
+    var vjs = stashPlayer();
     if(vjs && typeof vjs.currentTime === 'function'){ vjs.currentTime(seconds); return; }
     if(boundPlayer){ boundPlayer.currentTime = Math.max(0, seconds - streamOffsetMs / 1000); }
 }
@@ -2546,10 +2655,31 @@ function cleanUpOptions(list){
     }
 }
 
-function waitForPageChange(){
-    var chosenScript = document.querySelector('#stash-interactive-tools-select-funscripts');
-    if(chosenScript){ chosenScript.addEventListener('change', fetchAllFunscripts); cleanUpOptions(chosenScript); }
-    if(location.href == lastPage){ setTimeout(waitForPageChange, 500); return -1; }
+// Per-axis files load alongside the main script, so they aren't a choice of their own in the
+// Interactive Tools dropdown: tidy it as the user goes to open it. Picking another script
+// reloads them all. Listening on the document covers the dropdown however often it's redrawn.
+function watchScriptPicker(){
+    var isPicker = function(t){ return t && t.id === 'stash-interactive-tools-select-funscripts'; };
+    document.addEventListener('mousedown', function(e){ if(isPicker(e.target)){ cleanUpOptions(e.target); } }, true);
+    document.addEventListener('focusin', function(e){ if(isPicker(e.target)){ cleanUpOptions(e.target); } });
+    document.addEventListener('change', function(e){ if(isPicker(e.target)){ fetchAllFunscripts(); } });
+}
+
+// Stash announces each navigation to plugins. On a Stash that doesn't, check the address
+// twice a second instead.
+function watchPageChanges(){
+    watchScriptPicker();
+    var events = pageWindow.PluginApi && pageWindow.PluginApi.Event;
+    onPageChange(); // the page we started on
+    if(events && typeof events.addEventListener === 'function'){
+        events.addEventListener('stash:location', onPageChange);
+    }else{
+        setInterval(onPageChange, 500);
+    }
+}
+
+function onPageChange(){
+    if(location.href == lastPage){ return; }
     lastPage = location.href;
     scriptList = null;
 
@@ -2570,14 +2700,22 @@ function waitForPageChange(){
         videoPlayerLoaded = false;
         setClimaxMarkers(null, []);
     }
-    setTimeout(waitForPageChange, 500);
 }
 
-publishDebugApi();
-startNavButton();
-startSerialAutoConnect();
-autoConnectHr();
-startClimaxPolling();
-startPlayerWatch();
-startHud();
-waitForPageChange();
+// A userscript first checks whether the plugin is on this Stash; if it is, the userscript
+// hands over and stays out of the way.
+async function start(){
+    if(IS_USERSCRIPT && await pluginEnabled()){ handOffToPlugin(); return; }
+    publishDebugApi();
+    startNavButton();
+    startSerialAutoConnect();
+    autoConnectHr();
+    startClimaxPolling();
+    startPlayerWatch();
+    startHud();
+    watchPageChanges();
+}
+
+start();
+
+})();

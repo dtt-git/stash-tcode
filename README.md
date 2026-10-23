@@ -1,6 +1,6 @@
 # Stash-TCode
 
-A Tampermonkey userscript that drives TCode devices (OSR2/SR6 and similar) from
+A Stash plugin (also available as a Tampermonkey userscript) that drives TCode devices (OSR2/SR6 and similar) from
 [Stash](https://github.com/stashapp/stash) over USB using the Web Serial API.
 It plays a scene's funscripts, including multi-axis ones, on the device in sync with the video.
 With a Bluetooth heart-rate monitor it can also shorten strokes as your heart rate climbs and hold
@@ -48,15 +48,39 @@ are easing off at 72%. The navbar button shows the device status and live heart 
 
 ## Install
 
+### As a Stash plugin (recommended)
+
+1. In Stash, go to **Settings → Plugins → Available Plugins → Add Source** and add
+   `https://dtt-git.github.io/stash-tcode/main/index.yml`.
+2. Tick **Stash-TCode** under that source and click **Install**. Refresh the page.
+3. Click **Connect** in the navbar, then pick your device's serial port.
+   After that first time it reconnects by itself.
+
+The plugin works on whatever address you reach Stash at (port, reverse proxy or LAN name), and Stash
+keeps it updated from the source above. Settings are saved in the browser, like the device permissions
+they go with.
+
+**Coming from the userscript:** update the userscript to 0.7.0 or later before installing the plugin
+(Tampermonkey normally does this itself). On the next page load the userscript finds the plugin, copies
+your settings over and stops running, and a pop-up tells you so. Refresh once to load them into the
+plugin, then delete the userscript from Tampermonkey. An older userscript doesn't know about the plugin,
+so both would run and drive the device twice.
+
+To install by hand instead, put [`plugins/stash-tcode/stash-tcode.yml`](plugins/stash-tcode/stash-tcode.yml)
+and [`stash-tcode.user.js`](stash-tcode.user.js) together in a `stash-tcode` folder in your Stash plugins
+directory, then **Reload plugins** in Stash and refresh.
+
+### As a Tampermonkey userscript
+
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
 2. Open **[stash-tcode.user.js (raw)](https://raw.githubusercontent.com/dtt-git/stash-tcode/main/stash-tcode.user.js)**.
    Tampermonkey shows its install page; click **Install**. It then checks this repo for updates automatically.
 3. Open Stash. Click **Connect** in the navbar, then pick your device's serial port.
    After that first time it reconnects by itself.
 
-### Stash on another address
+#### Stash on another address
 
-Out of the box the script runs on any address with Stash's default port, `:9999`
+Out of the box the userscript runs on any address with Stash's default port, `:9999`
 (`http://localhost:9999`, `http://192.168.1.20:9999`, ...). If you reach Stash some other way, such as
 a reverse proxy (`https://stash.example.com`) or a different port, add that address to the script in
 Tampermonkey:
@@ -116,7 +140,20 @@ over 15 s. All three times are adjustable.
 
 ## Development
 
-Use the dev loader so you can edit in your editor and just refresh the browser,
+`stash-tcode.user.js` is the whole program, for both installs: the plugin manifest loads it as the
+plugin's script, and Tampermonkey installs it directly. The script checks which one it's running as
+(only Tampermonkey provides the `GM_*` functions).
+
+To try the plugin in a local Stash, copy it into your plugins folder, then **Reload plugins** in Stash and
+refresh:
+
+```bash
+STASH_PLUGINS_DIR=/path/to/stash/plugins dev/deploy-plugin.sh
+```
+
+`STASH_PLUGINS_DIR` can also go in a `.env` file at the repo root. Run it again after each edit.
+
+For the userscript, use the dev loader so you can edit in your editor and just refresh the browser,
 with no copy-paste into Tampermonkey:
 
 1. In the Tampermonkey extension's browser settings (`chrome://extensions` → Tampermonkey → Details),
@@ -144,7 +181,8 @@ Turn on **Advanced → Debug mode** to get:
 
 The heart-rate governor's math (approach band, edge hysteresis, decay, rejoin ramp, climax window,
 watchdog and axis shaping), the auto-motion sine and the speed limit, plus heart-rate packet decoding and
-serial port selection, are covered by plain Node tests:
+serial port selection, are covered by plain Node tests. `version.test.js` checks the version matches
+everywhere it's written.
 
 ```
 node tests/governor.test.js
@@ -152,13 +190,20 @@ node tests/hr-packets.test.js
 node tests/serial.test.js
 node tests/include.test.js
 node tests/linked.test.js
+node tests/version.test.js
 ```
 
 ### Releasing
 
-Bump `@version` in the header of `stash-tcode.user.js` and push to `main`. Installed copies pick up
-the new version on Tampermonkey's next update check, because of the script's `@updateURL`.
-If you don't bump the version, Tampermonkey ignores the change.
+Bump the version in all three places: `@version` in the header of `stash-tcode.user.js`,
+`TCODE_VERSION` just below it, and `version:` in `plugins/stash-tcode/stash-tcode.yml`. Then push to
+`main`.
+
+- Userscript installs pick up the new version on Tampermonkey's next update check, because of the
+  script's `@updateURL`. If you don't bump the version, Tampermonkey ignores the change.
+- The **Deploy** workflow runs the tests and publishes the plugin source index to GitHub Pages
+  (`https://dtt-git.github.io/stash-tcode/main/index.yml`), where Stash finds the update. GitHub Pages
+  has to be turned on once, with **Settings → Pages → Source** set to *GitHub Actions*.
 
 ## Credits
 

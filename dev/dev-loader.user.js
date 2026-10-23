@@ -6,7 +6,6 @@
 // @include      /^https?:\/\/[^\/?#]+:9999\//
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @grant        GM_info
 // @grant        unsafeWindow
 // @require      file:///C:/path/to/stash-tcode/stash-tcode.user.js
 // ==/UserScript==
