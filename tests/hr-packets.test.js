@@ -2,7 +2,7 @@
 // Run: node tests/hr-packets.test.js
 const fs = require('fs');
 const path = require('path');
-const src = fs.readFileSync(path.join(__dirname, '..', 'stash-tcode.user.js'), 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '..', 'plugins', 'stash-tcode', 'stash-tcode.js'), 'utf8');
 
 function grab(name) {
     const start = src.indexOf('function ' + name + '(');

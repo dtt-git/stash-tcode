@@ -1,7 +1,7 @@
-// Tests for the HR governor section of stash-tcode.user.js. Run: node tests/governor.test.js
+// Tests for the HR governor section of the plugin script. Run: node tests/governor.test.js
 const fs = require('fs');
 const path = require('path');
-const src = fs.readFileSync(path.join(__dirname, '..', 'stash-tcode.user.js'), 'utf8');
+const src = fs.readFileSync(path.join(__dirname, '..', 'plugins', 'stash-tcode', 'stash-tcode.js'), 'utf8');
 const start = src.indexOf('// --- HR GOVERNOR ---');
 const end = src.indexOf('function clamp9999('); // first function after the speed-limit section
 const section = src.slice(start, end);

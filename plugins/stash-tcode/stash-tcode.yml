@@ -1,0 +1,7 @@
+name: Stash-TCode
+description: Drive TCode devices (OSR2/SR6) from Stash over USB Web Serial, with optional heart-rate modulation
+version: 1.0.0
+url: https://github.com/dtt-git/stash-tcode
+ui:
+  javascript:
+    - stash-tcode.js
