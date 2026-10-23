@@ -1,7 +1,7 @@
 # Stash-TCode
 
-A Stash plugin (also available as a Tampermonkey userscript) that drives TCode devices (OSR2/SR6 and similar) from
-[Stash](https://github.com/stashapp/stash) over USB using the Web Serial API.
+A [Stash](https://github.com/stashapp/stash) plugin that drives TCode devices (OSR2/SR6 and similar)
+over USB using the Web Serial API. It's also available as a Tampermonkey userscript.
 It plays a scene's funscripts, including multi-axis ones, on the device in sync with the video.
 With a Bluetooth heart-rate monitor it can also shorten strokes as your heart rate climbs and hold
 off at the edge.
@@ -48,6 +48,19 @@ are easing off at 72%. The navbar button shows the device status and live heart 
 
 ## Install
 
+### Before you install
+
+- Use a Chromium-based browser (Chrome, Edge): Web Serial and Web Bluetooth only exist there.
+- Reach Stash on a secure origin: `localhost`, or HTTPS. If you reach it by a LAN address over plain
+  HTTP, add that origin under `chrome://flags/#unsafely-treat-insecure-origin-as-secure` or serve Stash
+  over HTTPS.
+- The **Stash Interactive Tools** plugin is optional. Without it, Stash-TCode plays each scene's main
+  funscript, single- or multi-axis, which Stash serves itself. You need it only for separate per-axis
+  files (`video.twist.funscript`, `video.roll.funscript`, ...), which Stash doesn't serve on its own,
+  and for picking between several scripts for one scene.
+
+The plugin is tested on Stash v0.31.
+
 ### As a Stash plugin (recommended)
 
 1. In Stash, go to **Settings → Plugins → Available Plugins → Add Source** and add
@@ -93,16 +106,9 @@ Tampermonkey:
 User includes are kept when the script updates. Leave **Original includes** ticked if you also use
 port 9999.
 
-Web Serial and Web Bluetooth only work in Chromium-based browsers (Chrome, Edge) and only on a
-secure origin. If you reach Stash by a LAN hostname over plain HTTP, add that origin under
-`chrome://flags/#unsafely-treat-insecure-origin-as-secure` or serve Stash over HTTPS.
+#### Upgrading from 0.5.x
 
-The **Stash Interactive Tools** plugin is optional. Without it, the script plays each scene's main
-funscript, single- or multi-axis, which Stash serves itself. You need the plugin only for separate
-per-axis files (`video.twist.funscript`, `video.roll.funscript`, ...), which Stash doesn't serve on its
-own, and for picking between several scripts for one scene.
-
-Upgrading from 0.5.x "Stash-TCode (USB Fix)": the name changed, so Tampermonkey installs this as a
+The 0.5.x script was named "Stash-TCode (USB Fix)". Because the name changed, Tampermonkey installs this as a
 new script with fresh settings. Set your ranges again and delete the old script.
 
 ## Heart-rate modulation
