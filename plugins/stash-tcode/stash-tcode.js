@@ -582,15 +582,25 @@ function createNavButton(){
     return btn;
 }
 
-// Append the button as the very last child of the Donate/Stats/Settings/Help cluster
+// Add the button to the Donate/Stats/Settings/Help cluster
 // (.navbar-buttons — distinct from the primary Scenes/Images/.../Tags nav-link list,
 // which is also, confusingly, classed .navbar-nav). No-op if already present, so the
 // keep-alive interval can call it freely.
+// The button goes at the start of the cluster, left of Stash's New button: right after the
+// SFW Switch plugin's button if that's there, otherwise first. Returns the wrapper added.
+function placeNavButton(navButtons){
+    var wrap = el('span', {class: 'mr-2 d-flex align-items-center tcode-nav-wrap'}, [createNavButton()]);
+    var sfw = navButtons.querySelector('#plugin_sfw');
+    var after = sfw && sfw.closest('.navbar-buttons > *');
+    if(after){ after.after(wrap); } else { navButtons.prepend(wrap); }
+    return wrap;
+}
+
 function injectNavButton(){
     if(document.getElementById('tcode-nav-btn')){ return; }
     var navButtons = document.querySelector('.navbar-buttons');
     if(!navButtons){ return; } // navbar not rendered yet; the keep-alive will retry
-    navButtons.appendChild(createNavButton()); // very end of the cluster
+    placeNavButton(navButtons);
     updateNavButton();
     updateHrUi();
 }
@@ -605,10 +615,10 @@ function patchNavButton(api){
         React.useEffect(function(){
             var slot = ref.current;
             if(!slot || !slot.closest('.navbar-buttons') || document.getElementById('tcode-nav-btn')){ return; }
-            slot.appendChild(createNavButton());
+            var wrap = placeNavButton(slot.closest('.navbar-buttons'));
             updateNavButton();
             updateHrUi();
-            return function(){ slot.textContent = ''; };
+            return function(){ wrap.remove(); };
         }, []);
         return React.createElement('div', {ref: ref, className: 'tcode-nav-slot d-flex align-items-center'});
     }
