@@ -41,7 +41,8 @@ Maintained by **dtt**. Originally based on Stash-TCode by Spunkle, with modifica
 Left, the Heart Rate tab. Right, the Axes tab with twist set to follow stroke.
 
 The stats overlay on the video, two edges in: the ceiling has decayed from 120 to 118 BPM and strokes
-are easing off at 72%. The navbar button shows the device status and live heart rate.
+are easing off at 72%. The navbar button shows the device status and live heart rate; with heart-rate modulation on, a
+second dot shows whether the monitor is sending readings.
 
 <p>
   <img src="docs/screenshots/overlay.png" alt="Stats overlay: 112 BPM, ceiling 118 (−2), easing 72%, 2 edges" width="300">

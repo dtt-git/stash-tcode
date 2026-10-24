@@ -531,7 +531,9 @@ function injectNavStyles(){
         .tcode-dot.on { background: ${STASH.success}; }
         #tcode-nav-btn { display: flex; align-items: center; }
         #tcode-nav-btn .tcode-nav-status { white-space: nowrap; }
-        #tcode-nav-btn .tcode-nav-hr { margin-left: 8px; font-variant-numeric: tabular-nums; }
+        #tcode-nav-btn .tcode-nav-hr { margin-left: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        #tcode-nav-btn .tcode-nav-hrdot { margin-right: 0; }
+        #tcode-nav-btn .tcode-nav-hr.modulating .tcode-nav-live { margin-left: 6px; }
         #tcode-nav-btn .tcode-nav-heart { color: #ff7373; margin-right: 3px; }
         /* Phones: the label is hidden, leaving the dot alone. Centre it in a button as wide as
            the icon buttons beside it (SFW Switch, New), with the same gap after it. */
@@ -539,6 +541,7 @@ function injectNavStyles(){
             .navbar-buttons .tcode-nav-slot { margin-right: .5rem; }
             #tcode-nav-btn { min-width: 42px; justify-content: center; }
             #tcode-nav-btn .tcode-dot { margin-right: 0; }
+            #tcode-nav-btn .tcode-nav-hr { margin-left: 6px; }
         }
     `;
     document.head.appendChild(s);
@@ -550,14 +553,15 @@ function updateNavButton(){
     var btn = document.getElementById('tcode-nav-btn');
     if(!btn){ return; }
     var labelText = btn.querySelector('.tcode-nav-label-text');
-    btn.querySelector('.tcode-dot').classList.toggle('on', serialConnected);
-    if(serialConnected){
-        btn.title = "TCode: Connected — click for settings";
-        if(labelText){ labelText.textContent = "Connected"; }
-    }else{
-        btn.title = "TCode: Not connected — click for settings";
-        if(labelText){ labelText.textContent = "Connect"; }
-    }
+    btn.querySelector('.tcode-nav-devdot').classList.toggle('on', serialConnected);
+    if(labelText){ labelText.textContent = serialConnected ? "Connected" : "Connect"; }
+    setNavTitle(btn);
+}
+
+function setNavTitle(btn){
+    var parts = ["TCode: " + (serialConnected ? "connected" : "not connected")];
+    if(settings.hr.enabled){ parts.push("heart rate monitor: " + (hrLive() ? hr.bpm + " BPM" : "no reading")); }
+    btn.title = parts.join(" · ") + " — click for settings";
 }
 
 function createNavButton(){
@@ -568,10 +572,12 @@ function createNavButton(){
     // Match the Stats/Settings button classes (flex + vertically centered) plus Stash's
     // own nav-utility styling, so it sits flush with its neighbors.
     btn.className = 'nav-utility minimal d-flex align-items-center h-100 btn btn-primary';
-    // The dot and label share one line of text, so the dot can line up with the letters.
-    btn.innerHTML = '<span class="tcode-nav-status"><span class="tcode-dot"></span>' +
+    // Each dot shares a line of text with what follows it, so it lines up with the letters.
+    // The second dot (the heart-rate monitor) shows while heart-rate modulation is on.
+    btn.innerHTML = '<span class="tcode-nav-status"><span class="tcode-dot tcode-nav-devdot"></span>' +
         '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span></span>' +
-        '<span class="tcode-nav-hr" style="display: none"><span class="tcode-nav-heart">♥</span><span class="tcode-nav-bpm"></span></span>';
+        '<span class="tcode-nav-hr" style="display: none"><span class="tcode-dot tcode-nav-hrdot"></span>' +
+        '<span class="tcode-nav-live"><span class="tcode-nav-heart">♥</span><span class="tcode-nav-bpm"></span></span></span>';
     btn.addEventListener('click', function(){ toggleMenu(); });
     return btn;
 }
@@ -935,7 +941,7 @@ function buildHrTab(body){
     var main = uiSection(body, "Heart-rate modulation",
         "Shortens strokes as your heart rate nears your edge, and holds the stroker back there until you recover.");
     uiSetting(main, "Enable", hr.status === 'off' ? "Connect a monitor on the Device tab. Without one, scripts play normally." : null,
-        uiSwitch('hrEnabled', cfg.enabled, function(v){ cfg.enabled = v; changed(); }));
+        uiSwitch('hrEnabled', cfg.enabled, function(v){ cfg.enabled = v; changed(); updateHrUi(); }));
     var live = uiSetting(main, "Session", null,
         uiButton("Reset", "secondary", function(){ resetHrSession(); }, {small: true}));
     live.firstChild.appendChild(el('div', {class: 'sub-heading', id: 'tcode-gov-status', text: govStatusText(lastGov)}));
@@ -1415,10 +1421,18 @@ function hrStatusText(){
 
 // Cheap live updates (nav readout, status line) without re-rendering the dialog.
 function updateHrUi(){
-    var navHr = document.querySelector('#tcode-nav-btn .tcode-nav-hr');
-    if(navHr){
-        navHr.querySelector('.tcode-nav-bpm').textContent = hrLive() ? hr.bpm : "";
-        navHr.style.display = hrLive() ? "" : "none";
+    var btn = document.getElementById('tcode-nav-btn');
+    if(btn){
+        var live = hrLive(), modulating = !!settings.hr.enabled;
+        var navHr = btn.querySelector('.tcode-nav-hr');
+        navHr.style.display = modulating || live ? "" : "none";
+        navHr.classList.toggle('modulating', modulating);
+        var hrDot = navHr.querySelector('.tcode-nav-hrdot');
+        hrDot.style.display = modulating ? "" : "none";
+        hrDot.classList.toggle('on', live);
+        navHr.querySelector('.tcode-nav-live').style.display = live ? "" : "none";
+        navHr.querySelector('.tcode-nav-bpm').textContent = live ? hr.bpm : "";
+        setNavTitle(btn);
     }
     var line = document.getElementById('tcode-hr-status');
     if(line){ line.textContent = hrStatusText(); }
@@ -2867,6 +2881,7 @@ function onPageChange(){
 async function start(){
     startNavButton(); // first: the navbar patch must be in before Stash draws the navbar
     await loadStashSettings(); // before anything reads the settings
+    updateHrUi(); // the navbar button may have drawn before Stash's settings arrived
     publishDebugApi();
     startSerialAutoConnect();
     autoConnectHr();
