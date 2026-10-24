@@ -582,25 +582,35 @@ function createNavButton(){
     return btn;
 }
 
-// Add the button to the Donate/Stats/Settings/Help cluster
+// Append the button as the very last child of the Donate/Stats/Settings/Help cluster
 // (.navbar-buttons — distinct from the primary Scenes/Images/.../Tags nav-link list,
 // which is also, confusingly, classed .navbar-nav). No-op if already present, so the
 // keep-alive interval can call it freely.
-// The button goes at the start of the cluster, left of Stash's New button: right after the
-// SFW Switch plugin's button if that's there, otherwise first. Returns the wrapper added.
-function placeNavButton(navButtons){
-    var wrap = el('span', {class: 'mr-2 d-flex align-items-center tcode-nav-wrap'}, [createNavButton()]);
-    var sfw = navButtons.querySelector('#plugin_sfw');
-    var after = sfw && sfw.closest('.navbar-buttons > *');
-    if(after){ after.after(wrap); } else { navButtons.prepend(wrap); }
-    return wrap;
+// Phones (Stash's phone layout, where it hides the Donate/Stats/Settings buttons from the bar and
+// shows them in the menu): the button steps in front of Stash's New button, wherever plugins put
+// theirs. Wider, or on a page without New, it sits in its own slot at the end of the cluster.
+// Only our button moves, never Stash's or anyone else's.
+var NAV_NARROW = '(max-width: 575.98px)';
+function syncNavPlacement(slot){
+    var btn = document.getElementById('tcode-nav-btn');
+    var cluster = slot && slot.closest('.navbar-buttons');
+    if(!btn || !cluster){ return; }
+    var newBtn = cluster.querySelector('a[href$="/new"]');
+    var newItem = newBtn && newBtn.closest('.navbar-buttons > *');
+    if(window.matchMedia(NAV_NARROW).matches && newItem){
+        btn.classList.add('mr-2');
+        if(btn.nextSibling !== newItem){ newItem.before(btn); }
+    }else{
+        btn.classList.remove('mr-2');
+        if(btn.parentNode !== slot){ slot.appendChild(btn); }
+    }
 }
 
 function injectNavButton(){
     if(document.getElementById('tcode-nav-btn')){ return; }
     var navButtons = document.querySelector('.navbar-buttons');
     if(!navButtons){ return; } // navbar not rendered yet; the keep-alive will retry
-    placeNavButton(navButtons);
+    navButtons.appendChild(createNavButton()); // very end of the cluster
     updateNavButton();
     updateHrUi();
 }
@@ -615,10 +625,24 @@ function patchNavButton(api){
         React.useEffect(function(){
             var slot = ref.current;
             if(!slot || !slot.closest('.navbar-buttons') || document.getElementById('tcode-nav-btn')){ return; }
-            var wrap = placeNavButton(slot.closest('.navbar-buttons'));
+            slot.appendChild(createNavButton());
             updateNavButton();
             updateHrUi();
-            return function(){ wrap.remove(); };
+            // Re-place on resize, and after navigation (New comes and goes with the page).
+            var sync = function(){ syncNavPlacement(slot); };
+            var narrow = window.matchMedia(NAV_NARROW);
+            var onPage = function(){ setTimeout(sync, 0); };
+            sync();
+            narrow.addEventListener('change', sync);
+            window.addEventListener('resize', sync); // not every resize reports a media change
+            if(window.PluginApi && window.PluginApi.Event){ window.PluginApi.Event.addEventListener('stash:location', onPage); }
+            return function(){
+                narrow.removeEventListener('change', sync);
+                window.removeEventListener('resize', sync);
+                if(window.PluginApi && window.PluginApi.Event){ window.PluginApi.Event.removeEventListener('stash:location', onPage); }
+                var btn = document.getElementById('tcode-nav-btn');
+                if(btn){ btn.remove(); }
+            };
         }, []);
         return React.createElement('div', {ref: ref, className: 'tcode-nav-slot d-flex align-items-center'});
     }
