@@ -20,6 +20,9 @@ Maintained by **dtt**. Originally based on Stash-TCode by Spunkle, with modifica
   playback stays in sync.
 - Auto motion: any axis the scene has no script for can follow a smooth sine wave at its own
   frequency, so a video without a funscript still gets motion.
+- Idle motion: the stroke axis can keep a slow stroke going whenever no video is playing, while
+  you browse for the next scene or with the video paused. Speed (3-60 strokes a minute) and stroke length are adjustable
+  (**Axes → L0 → Idle motion**). It starts 2 s after playback stops and gives way the moment a video plays.
 - Linked axes: an axis can **follow** another, e.g. twist mirroring stroke: when stroke goes
   0-100%, twist goes 0-100% of its own range, in step. Use the follower's Invert to reverse it.
   It applies when the axis has no script of its own, or always with **Override script** on.
@@ -38,7 +41,8 @@ Maintained by **dtt**. Originally based on Stash-TCode by Spunkle, with modifica
 Left, the Heart Rate tab. Right, the Axes tab with twist set to follow stroke.
 
 The stats overlay on the video, two edges in: the ceiling has decayed from 120 to 118 BPM and strokes
-are easing off at 72%. The navbar button shows the device status and live heart rate.
+are easing off at 72%. The navbar button shows the device status and live heart rate; with heart-rate modulation on, a
+second dot beside the first shows whether the monitor is sending readings.
 
 <p>
   <img src="docs/screenshots/overlay.png" alt="Stats overlay: 112 BPM, ceiling 118 (−2), easing 72%, 2 edges" width="300">
@@ -121,6 +125,11 @@ its heart rate. Then turn it on under **Heart Rate**.
 - **Session** shows the live state, and **Reset** clears the edge count and decay. The session
   survives a page reload but ends when you close the tab.
 
+Changes to how far each axis may move are eased in rather than applied at once. A monitor reports
+about once a second, so in the approach band each new reading would otherwise make every axis jump.
+Easing back in is gentle, and backing off at the edge happens within about a second. Losing the
+monitor's signal still stops the device immediately.
+
 Chrome only reconnects a Bluetooth monitor after a refresh if
 `chrome://flags/#enable-web-bluetooth-new-permissions-backend` is on. Without it, the Device tab
 shows a one-click **Reconnect**.
@@ -164,14 +173,18 @@ Turn on **Advanced → Debug mode** to get:
 
 The heart-rate governor's math (approach band, edge hysteresis, decay, rejoin ramp, climax window,
 watchdog and axis shaping), the auto-motion sine and the speed limit, plus heart-rate packet decoding and
-serial port selection, are covered by plain Node tests. `version.test.js` checks the manifest loads the
-script and the version matches in both places.
+serial port selection, are covered by plain Node tests. `smoothing.test.js` runs a slow twist through an
+edge with a simulated monitor and checks the shaping never jolts it, and `idle.test.js` runs idle motion
+on a simulated clock. `version.test.js` checks the manifest loads the script and the version matches in
+both places.
 
 ```
 node tests/governor.test.js
 node tests/hr-packets.test.js
 node tests/serial.test.js
 node tests/linked.test.js
+node tests/smoothing.test.js
+node tests/idle.test.js
 node tests/version.test.js
 ```
 
