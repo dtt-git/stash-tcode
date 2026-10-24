@@ -532,8 +532,7 @@ function injectNavStyles(){
         #tcode-nav-btn { display: flex; align-items: center; }
         #tcode-nav-btn .tcode-nav-status { white-space: nowrap; }
         #tcode-nav-btn .tcode-nav-hr { margin-left: 8px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-        #tcode-nav-btn .tcode-nav-hrdot { margin-right: 0; }
-        #tcode-nav-btn .tcode-nav-hr.modulating .tcode-nav-live { margin-left: 6px; }
+        #tcode-nav-btn .tcode-nav-hrdot { margin-left: -3px; } /* 3px from the device dot */
         #tcode-nav-btn .tcode-nav-heart { color: #ff7373; margin-right: 3px; }
         /* Phones: the label is hidden, leaving the dot alone. Centre it in a button as wide as
            the icon buttons beside it (SFW Switch, New), with the same gap after it. */
@@ -541,6 +540,7 @@ function injectNavStyles(){
             .navbar-buttons .tcode-nav-slot { margin-right: .5rem; }
             #tcode-nav-btn { min-width: 42px; justify-content: center; }
             #tcode-nav-btn .tcode-dot { margin-right: 0; }
+            #tcode-nav-btn .tcode-nav-hrdot { margin-left: 3px; }
             #tcode-nav-btn .tcode-nav-hr { margin-left: 6px; }
         }
     `;
@@ -572,12 +572,12 @@ function createNavButton(){
     // Match the Stats/Settings button classes (flex + vertically centered) plus Stash's
     // own nav-utility styling, so it sits flush with its neighbors.
     btn.className = 'nav-utility minimal d-flex align-items-center h-100 btn btn-primary';
-    // Each dot shares a line of text with what follows it, so it lines up with the letters.
-    // The second dot (the heart-rate monitor) shows while heart-rate modulation is on.
+    // The dots and label share one line of text, so the dots line up with the letters. The
+    // second dot (the heart-rate monitor) sits beside the device's while modulation is on.
     btn.innerHTML = '<span class="tcode-nav-status"><span class="tcode-dot tcode-nav-devdot"></span>' +
+        '<span class="tcode-dot tcode-nav-hrdot" style="display: none"></span>' +
         '<span class="d-none d-sm-inline tcode-nav-label-text">Connect</span></span>' +
-        '<span class="tcode-nav-hr" style="display: none"><span class="tcode-dot tcode-nav-hrdot"></span>' +
-        '<span class="tcode-nav-live"><span class="tcode-nav-heart">♥</span><span class="tcode-nav-bpm"></span></span></span>';
+        '<span class="tcode-nav-hr" style="display: none"><span class="tcode-nav-heart">♥</span><span class="tcode-nav-bpm"></span></span>';
     btn.addEventListener('click', function(){ toggleMenu(); });
     return btn;
 }
@@ -1423,14 +1423,12 @@ function hrStatusText(){
 function updateHrUi(){
     var btn = document.getElementById('tcode-nav-btn');
     if(btn){
-        var live = hrLive(), modulating = !!settings.hr.enabled;
-        var navHr = btn.querySelector('.tcode-nav-hr');
-        navHr.style.display = modulating || live ? "" : "none";
-        navHr.classList.toggle('modulating', modulating);
-        var hrDot = navHr.querySelector('.tcode-nav-hrdot');
-        hrDot.style.display = modulating ? "" : "none";
+        var live = hrLive();
+        var hrDot = btn.querySelector('.tcode-nav-hrdot');
+        hrDot.style.display = settings.hr.enabled ? "" : "none";
         hrDot.classList.toggle('on', live);
-        navHr.querySelector('.tcode-nav-live').style.display = live ? "" : "none";
+        var navHr = btn.querySelector('.tcode-nav-hr');
+        navHr.style.display = live ? "" : "none";
         navHr.querySelector('.tcode-nav-bpm').textContent = live ? hr.bpm : "";
         setNavTitle(btn);
     }
