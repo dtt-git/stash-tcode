@@ -533,6 +533,13 @@ function injectNavStyles(){
         #tcode-nav-btn .tcode-nav-status { white-space: nowrap; }
         #tcode-nav-btn .tcode-nav-hr { margin-left: 8px; font-variant-numeric: tabular-nums; }
         #tcode-nav-btn .tcode-nav-heart { color: #ff7373; margin-right: 3px; }
+        /* Phones: the label is hidden, leaving the dot alone. Centre it in a button as wide as
+           the icon buttons beside it (SFW Switch, New), with the same gap after it. */
+        @media (max-width: 575.98px) {
+            .navbar-buttons .tcode-nav-slot { margin-right: .5rem; }
+            #tcode-nav-btn { min-width: 42px; justify-content: center; }
+            #tcode-nav-btn .tcode-dot { margin-right: 0; }
+        }
     `;
     document.head.appendChild(s);
 }
