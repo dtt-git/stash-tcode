@@ -221,7 +221,7 @@ function loadSettings(stored){
                            "hr": { deviceId: null, deviceName: null, enabled: false,
                                    edgeHr: 140, band: 10, floor: 30, rejoinSec: 8, timeoutSec: 8,
                                    decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105,
-                                   climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15, climaxTag: "Climax" },
+                                   climax: true, climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15, climaxTag: "Climax" },
                            "currentVersion": thisVersion};
     settings = stored !== undefined ? stored : importUserscriptSettings(storeGet("settings", null));
     if(settings == null){ settings = defaultSettings; }
@@ -1020,6 +1020,8 @@ function buildClimaxTab(body){
 
     var main = uiSection(body, "Climax markers",
         "Scene markers with this tag release the limiter: strokes build to full before the marker and stay full, whatever your heart rate. Works with heart-rate modulation on.");
+    uiSetting(main, "Enable", "Turn off to keep edging through a scene's climax markers; turn back on when you're ready.",
+        uiSwitch('climaxEnabled', cfg.climax, function(v){ cfg.climax = v; changed(); }));
     var tagInput = el('input', {type: 'text', id: 'tcode-climaxTag', class: 'input-control form-control form-control-sm', value: cfg.climaxTag,
                                 style: 'width: 160px', spellcheck: 'false'});
     tagInput.addEventListener('change', function(){
@@ -1624,11 +1626,13 @@ function phaseColor(g){
     }
 }
 
-// Time to the next climax marker ahead of the playhead, or "".
+// Time to the next climax marker ahead of the playhead, or "". With climax markers turned
+// off, a reminder instead, so a marker isn't expected to take over.
 function nextClimaxText(sceneMs){
     if(sceneMs == null){ return ""; }
     var ahead = climaxMarksMs.map(function(m){ return m.at; }).filter(function(at){ return at > sceneMs; });
     if(!ahead.length){ return ""; }
+    if(settings.hr.climax === false){ return "Climax off"; }
     return "Climax in " + formatTime((Math.min.apply(null, ahead) - sceneMs) / 1000);
 }
 
@@ -2163,7 +2167,8 @@ function computeAllowance(now, sceneMs){
     var wc = workingCeiling(cfg, hrSession.edges);
     res.ceiling = wc.ceiling;
     res.decay = wc.decay;
-    res.climax = climaxFactor(sceneMs, climaxMarksMs, cfg.climaxRampSec * 1000, cfg.climaxHoldSec * 1000, cfg.climaxEaseSec * 1000);
+    res.climax = cfg.climax === false ? 0 :
+        climaxFactor(sceneMs, climaxMarksMs, cfg.climaxRampSec * 1000, cfg.climaxHoldSec * 1000, cfg.climaxEaseSec * 1000);
 
     if(hr.status === 'off'){
         // No monitor at all: play the script as-is rather than refuse to move.
