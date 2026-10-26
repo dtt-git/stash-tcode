@@ -142,10 +142,6 @@ limiter lets go, whatever your heart rate: strokes build back to full over 45 s 
 stay full for 20 s (or for the marker's whole range, if it has an end time), then hand control back
 over 15 s. All three times are adjustable.
 
-Not ready to finish yet? Turn climax markers off on the **Climax** tab and the scene's markers are
-ignored, so edging carries on through them; the stats overlay shows "Climax off" while a marker is
-still ahead. Turn them back on when you are.
-
 ## Development
 
 The plugin is [`plugins/stash-tcode/stash-tcode.js`](plugins/stash-tcode/stash-tcode.js), loaded by
