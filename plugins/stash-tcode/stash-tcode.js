@@ -302,6 +302,8 @@ function injectUiStyles(){
 #tcode-modal .setting .sub-heading { color: ${STASH.muted}; margin-top: .25rem; }
 #tcode-modal .setting.sub-setting { padding-left: 2rem; }
 #tcode-modal .setting.disabled > div:last-child { opacity: .5; pointer-events: none; }
+#tcode-modal .setting.dep { padding-left: 3.5rem; } /* only shown while the setting above it is on */
+#tcode-modal .setting.dep.off { display: none; }
 #tcode-modal .setting-group { padding-bottom: 0; }
 #tcode-modal .setting-group:not(:last-child) { border-bottom: 1px solid #000; }
 #tcode-modal .setting-group > .setting { border-bottom: none; }
@@ -396,7 +398,7 @@ function uiSection(parent, title, subheading){
 // One Stash settings row: title and hint on the left, control on the right.
 function uiSetting(parent, title, hint, control, opts){
     opts = opts || {};
-    var row = el('div', {class: 'setting' + (opts.sub ? ' sub-setting' : '') + (opts.disabled ? ' disabled' : '')}, [
+    var row = el('div', {class: 'setting' + (opts.sub ? ' sub-setting' : '') + (opts.dep ? ' dep' : '') + (opts.disabled ? ' disabled' : '')}, [
         el('div', null, [el('h3', {text: title}), hint ? el('div', {class: 'sub-heading', text: hint}) : null]),
         el('div', null, [control])
     ]);
@@ -849,7 +851,8 @@ function buildAxisGroup(card, axis){
             function(lo, hi){ applyRange(lo, hi, true); }).el, {sub: true});
     uiSetting(group, "Invert", "Flip the direction of this axis.",
         uiSwitch('invert' + axis, cfg.invert, function(v){ cfg.invert = v; saveSettings(); }), {sub: true});
-    var autoRow, freqRow, overrideRow;
+    // Rows that only matter while another setting is on stay hidden until it is (see syncRows).
+    var rows = {};
     var linkSelect = el('select', {id: 'tcode-link' + axis, class: 'input-control form-control form-control-sm', style: 'width: 160px'},
         [el('option', {value: '', text: 'Off'})].concat(AXIS_LIST.filter(function(o){ return o !== axis; }).map(function(o){
             return el('option', {value: o, text: o + ' · ' + AXIS_NAMES[o]});
@@ -857,32 +860,28 @@ function buildAxisGroup(card, axis){
     linkSelect.value = cfg.link || '';
     linkSelect.addEventListener('change', function(){
         cfg.link = linkSelect.value;
-        overrideRow.classList.toggle('disabled', !cfg.link);
-        autoRow.classList.toggle('disabled', !!cfg.link);
-        freqRow.classList.toggle('disabled', !!cfg.link || !cfg.auto);
+        syncRows();
         saveSettings();
     });
     uiSetting(group, "Follow", "Copy another axis's motion: this axis moves to the same point in its own range. Applies when the scene has no script for this axis.",
         linkSelect, {sub: true});
-    overrideRow = uiSetting(group, "Override script", "Follow even when the scene has a script for this axis, ignoring that script.",
-        uiSwitch('linkOverride' + axis, cfg.linkOverride, function(v){ cfg.linkOverride = v; saveSettings(); }),
-        {sub: true, disabled: !cfg.link});
-    autoRow = uiSetting(group, "Auto motion", "When the scene has no script for this axis, move in a smooth sine wave instead.",
-        uiSwitch('auto' + axis, cfg.auto, function(v){ cfg.auto = v; freqRow.classList.toggle('disabled', !v || !!cfg.link); saveSettings(); }),
-        {sub: true, disabled: !!cfg.link});
+    rows.override = uiSetting(group, "Override script", "Follow even when the scene has a script for this axis, ignoring that script.",
+        uiSwitch('linkOverride' + axis, cfg.linkOverride, function(v){ cfg.linkOverride = v; saveSettings(); }), {sub: true, dep: true});
+    // Following replaces auto motion, so its rows go while the axis follows another.
+    rows.auto = uiSetting(group, "Auto motion", "When the scene has no script for this axis, move in a smooth sine wave instead.",
+        uiSwitch('auto' + axis, cfg.auto, function(v){ cfg.auto = v; syncRows(); saveSettings(); }), {sub: true});
     var hzFormat = function(v){ return v.toFixed(2) + " Hz · " + Math.round(v * 60) + "/min"; };
-    freqRow = uiSetting(group, "Frequency", "Full cycles per second.",
+    rows.freq = uiSetting(group, "Frequency", "Full cycles per second.",
         uiRange('autoHz' + axis, cfg.autoHz, {min: AUTO_HZ_MIN, max: AUTO_HZ_MAX, step: 0.05, format: hzFormat}, null,
-                function(v){ cfg.autoHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.auto || !!cfg.link});
-    if(axis === "L0"){ buildIdleRows(group, cfg); }
-    var speedRow;
+                function(v){ cfg.autoHz = v; saveSettings(); }).el, {sub: true, dep: true});
+    if(axis === "L0"){ buildIdleRows(group, cfg, rows, function(){ syncRows(); }); }
     uiSetting(group, "Speed limit", "Cap how fast this axis moves. Faster moves are shortened so they stay in sync with the video.",
-        uiSwitch('speedLimit' + axis, cfg.speedLimit, function(v){ cfg.speedLimit = v; speedRow.classList.toggle('disabled', !v); saveSettings(); }), {sub: true});
+        uiSwitch('speedLimit' + axis, cfg.speedLimit, function(v){ cfg.speedLimit = v; syncRows(); saveSettings(); }), {sub: true});
     // Stored as full travels per second (cfg.maxSpeed); shown as % of full travel per second.
-    speedRow = uiSetting(group, "Max speed", "How much of its full travel this axis may cover per second.",
+    rows.speed = uiSetting(group, "Max speed", "How much of its full travel this axis may cover per second.",
         uiRange('maxSpeed' + axis, Math.round(cfg.maxSpeed * 100), {min: MAX_SPEED_MIN * 100, max: MAX_SPEED_MAX * 100, step: 25,
                 format: function(v){ return v + "%/s"; }}, null,
-                function(v){ cfg.maxSpeed = v / 100; saveSettings(); }).el, {sub: true, disabled: !cfg.speedLimit});
+                function(v){ cfg.maxSpeed = v / 100; saveSettings(); }).el, {sub: true, dep: true});
     uiSetting(group, "Auto home", "Rest at the middle of the range. Turn off to choose the home position.",
         uiSwitch('autoCenter' + axis, cfg.autoCenter !== false, function(v){
             cfg.autoCenter = v;
@@ -896,21 +895,28 @@ function buildAxisGroup(card, axis){
         saveSettings();
         if(serialConnected){ centerAxis(axis); } // preview on release, not on every input event
     });
-    var homeRow = uiSetting(group, "Home position", null, homeRange.el, {sub: true});
+    rows.home = uiSetting(group, "Home position", null, homeRange.el, {sub: true, dep: true});
 
+    function syncRows(){
+        var show = function(row, on){ if(row){ row.classList.toggle('off', !on); } };
+        show(rows.override, !!cfg.link);
+        show(rows.auto, !cfg.link);
+        show(rows.freq, !cfg.link && cfg.auto);
+        show(rows.idleSpeed, cfg.idle);
+        show(rows.idleStroke, cfg.idle);
+        show(rows.speed, cfg.speedLimit);
+        show(rows.home, cfg.autoCenter === false);
+    }
     function syncHome(){
         var auto = cfg.autoCenter !== false;
-        homeRange.setDisabled(auto);
-        homeRow.classList.toggle('disabled', auto);
         if(auto){ homeRange.set(getCenter(axis)); }
+        syncRows();
     }
     syncHome();
 }
 
-// Idle motion settings, on the stroke axis only.
-function buildIdleRows(group, cfg){
-    var speedRow, strokeRow;
-    var sync = function(){ speedRow.classList.toggle('disabled', !cfg.idle); strokeRow.classList.toggle('disabled', !cfg.idle); };
+// Idle motion settings, on the stroke axis only. Adds its dependent rows to `rows`.
+function buildIdleRows(group, cfg, rows, sync){
     uiSetting(group, "Idle motion", "Keep a slow stroke going while no video is playing, like when you're picking what to watch next.",
         uiSwitch('idleL0', cfg.idle, function(v){
             cfg.idle = v;
@@ -920,12 +926,12 @@ function buildIdleRows(group, cfg){
         }), {sub: true});
     // Stored in Hz like auto motion, but idle strokes are slow, so shown per minute.
     var perMinute = function(v){ return Math.round(v * 60) + " strokes/min"; };
-    speedRow = uiSetting(group, "Idle speed", "Full strokes per minute.",
+    rows.idleSpeed = uiSetting(group, "Idle speed", "Full strokes per minute.",
         uiRange('idleHzL0', cfg.idleHz, {min: IDLE_HZ_MIN, max: IDLE_HZ_MAX, step: 0.05, format: perMinute}, null,
-                function(v){ cfg.idleHz = v; saveSettings(); }).el, {sub: true, disabled: !cfg.idle});
-    strokeRow = uiSetting(group, "Idle stroke", "How much of the range idle strokes use, centred in it.",
+                function(v){ cfg.idleHz = v; saveSettings(); }).el, {sub: true, dep: true});
+    rows.idleStroke = uiSetting(group, "Idle stroke", "How much of the range idle strokes use, centred in it.",
         uiRange('idleRangeL0', cfg.idleRange, {min: IDLE_RANGE_MIN, max: 100, step: 5, format: function(v){ return v + "%"; }}, null,
-                function(v){ cfg.idleRange = v; saveSettings(); }).el, {sub: true, disabled: !cfg.idle});
+                function(v){ cfg.idleRange = v; saveSettings(); }).el, {sub: true, dep: true});
 }
 
 // ---- Advanced tab ----
