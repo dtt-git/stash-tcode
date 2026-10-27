@@ -185,6 +185,7 @@ node tests/serial.test.js
 node tests/linked.test.js
 node tests/smoothing.test.js
 node tests/idle.test.js
+node tests/player.test.js
 node tests/version.test.js
 ```
 

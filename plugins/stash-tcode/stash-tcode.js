@@ -2669,13 +2669,20 @@ function unbindPlayer(){
     boundPlayer = null;
 }
 
+// The scene's own player <video>, or null. Only Stash's video.js player counts: other
+// <video>s share the page (Stash Battle's previews, wall previews), and binding one of
+// those drove the device from a muted preview and drew the overlay on it.
+function findScenePlayer(doc){
+    var v = doc.getElementById('VideoJsPlayer_html5_api');
+    if(v){ return v; }
+    var host = doc.getElementById('VideoJsPlayer');
+    return (host && host.querySelector('video.vjs-tech')) || null;
+}
+
 function waitForVideoPlayer(){
-    // Only the scene player counts: other pages (the scene wall, marker lists) have
-    // preview <video>s of their own.
-    // While the bound player is still in the page, skip the DOM lookups.
-    var player = !isFinite(getSceneId()) ? null
-        : (boundPlayer && boundPlayer.isConnected) ? boundPlayer
-        : (document.querySelector('#VideoJsPlayer_html5_api') || document.querySelector('video.vjs-tech') || document.querySelector('video'));
+    // Looked up every tick (a lookup by id is cheap), so a binding that went wrong while
+    // Stash swapped players between scenes is corrected on the next tick.
+    var player = !isFinite(getSceneId()) ? null : findScenePlayer(document);
     if(!player){
         // The element can disappear between scenes; drop the stale binding so the
         // replacement gets wired up instead of leaving listeners on a detached node.
