@@ -2301,31 +2301,37 @@ function updateGovUi(){
 // An axis with auto motion on, and no script for the current scene, follows a sine wave
 // across its range at its own frequency. A new target goes out every SINE_STEP_MS and
 // the device interpolates between them, so the motion is smooth rather than a zigzag.
-// It runs on video time, so it pauses with the video, and goes through the same
-// invert / heart-rate shaping as scripted motion.
+// It runs on its own clock, which only moves while the video plays: seeking doesn't move
+// it, so the sine carries on from where it was instead of spinning to a new point in its
+// cycle. It goes through the same invert / heart-rate shaping as scripted motion.
 
 var SINE_STEP_MS = 50;
-var SINE_REJOIN_MS = 500;   // first move after a seek or start: slow, never a slam
+var SINE_REJOIN_MS = 500;   // first move after a start or a pause: slow, never a slam
+var SINE_RESUME_MS = 2000;  // a gap between ticks longer than this was a pause, not playback
 var AUTO_HZ_MIN = 0.05;
 var AUTO_HZ_MAX = 3;
 
-// Sine position (0-100) at sceneMs. Each axis starts at a different point in its
+// Sine position (0-100) at tMs. Each axis starts at a different point in its
 // cycle so axes sharing a frequency don't move in lockstep.
-function sinePosition(hz, sceneMs, axisIndex){
+function sinePosition(hz, tMs, axisIndex){
     hz = Math.max(AUTO_HZ_MIN, Math.min(AUTO_HZ_MAX, Number(hz) || 0.5));
-    return 50 + 50 * Math.sin(2 * Math.PI * hz * sceneMs / 1000 + axisIndex * 0.7);
+    return 50 + 50 * Math.sin(2 * Math.PI * hz * tMs / 1000 + axisIndex * 0.7);
 }
 
-function autoMotion(axis, ms, jumped, a){
+// One playback tick at wall-clock `now`. ax.sineT is the axis's motion clock: it advances by
+// the real time between ticks, and stands still across a pause (the gap is skipped).
+function autoMotion(axis, now, a){
     var ax = AXIS[axis];
+    var fresh = ax.sineAt == null || now - ax.sineAt > SINE_RESUME_MS;
+    if(ax.sineT == null){ ax.sineT = 0; }
+    if(!fresh){ ax.sineT += Math.max(0, now - ax.sineAt); }
+    ax.sineAt = now;
     // Moves chain end to end: the next one goes out when the device reaches the last
     // target (ax.sineDue), so a slow rejoin move is never cut short by a quick step.
-    // A seek, or the playhead landing far from the chain, starts over with a rejoin.
-    var fresh = jumped || ax.sineDue == null || ms < ax.sineDue - SINE_REJOIN_MS || ms > ax.sineDue + SINE_REJOIN_MS;
-    if(!fresh && ms < ax.sineDue){ return; }
+    if(!fresh && ax.sineT < ax.sineDue){ return; }
     var interval = fresh ? SINE_REJOIN_MS : SINE_STEP_MS;
-    ax.sineDue = ms + interval;
-    emitAxisMove(axis, sinePosition(settings.axes[axis].autoHz, ms + interval, AXIS_LIST.indexOf(axis)), interval, a);
+    ax.sineDue = ax.sineT + interval;
+    emitAxisMove(axis, sinePosition(settings.axes[axis].autoHz, ax.sineDue, AXIS_LIST.indexOf(axis)), interval, a);
 }
 
 // --- IDLE MOTION ---
@@ -2568,7 +2574,7 @@ function currentAction(ms){
             if(AXIS[x].acts == null){
                 // No script for this axis in this scene: it follows another axis if linked
                 // (emitLinkedMoves, below), otherwise auto motion fills in if it's on.
-                if(!settings.axes[x].link && settings.axes[x].auto){ autoMotion(x, ms, jumped, a); }
+                if(!settings.axes[x].link && settings.axes[x].auto){ autoMotion(x, now, a); }
                 continue;
             }
             // Following with "Override script": ignore this axis's own script entirely.

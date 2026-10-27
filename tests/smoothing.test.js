@@ -21,6 +21,7 @@ function queueMove(axis, pos, int){ sent.push({ pos: Math.round(pos), int: int }
 `;
 const api = new Function(env + section + `
 return { computeAllowance, motionAllowance, smoothAllowance, autoMotion, hr, sent: function(){ return sent; },
+         resetAxis: function(){ AXIS.R0 = { limits: [0, 9999], lastPos: null }; },
          rise: A_RISE_PER_SEC, fall: A_FALL_PER_SEC };`)();
 
 let fails = 0;
@@ -49,7 +50,7 @@ for (let tick = 0; tick < 6000; tick++) {          // 60 s of video, 10 ms ticks
     const g = api.computeAllowance(now, ms);
     phases.add(g.phase);
     const n = api.sent().length;
-    api.autoMotion('R0', ms, tick === 0, api.motionAllowance(g, now));
+    api.autoMotion('R0', now, api.motionAllowance(g, now));
     if (api.sent().length > n) {
         const m = api.sent()[api.sent().length - 1];
         if (prev && tick > 100) worst = Math.max(worst, Math.abs(m.pos - prev.pos) / m.int * 1000);
@@ -62,6 +63,32 @@ for (let tick = 0; tick < 6000; tick++) {          // 60 s of video, 10 ms ticks
 const limit = 3142 + 5000 * api.fall;
 check('the run went through easing, edge and rejoining', ['EASING', 'EDGE', 'REJOINING'].every(p => phases.has(p)), [...phases]);
 check('twist never steps faster than the sine plus the capped shaping rate', worst <= limit, { worst: Math.round(worst), limit });
+
+// --- auto motion runs on its own clock: seeking doesn't move it, a pause holds it ---
+{
+    const R = { limits: [0, 9999] };
+    const run = (from, ticks, step) => { const out = []; for (let i = 0; i < ticks; i++) {
+        const n = api.sent().length; api.autoMotion('R0', from + i * step, 1);
+        if (api.sent().length > n) out.push(api.sent()[api.sent().length - 1]); } return out; };
+    api.resetAxis();
+    let t = 5e6;
+    const first = run(t, 200, 10);                    // 2 s of playback
+    check('starts with a slow rejoin move', first[0].int === 500, first[0]);
+    t += 2000;
+    // Video time plays no part, so a seek mid-playback is just the next tick: no rejoin, no jump.
+    const after = run(t, 100, 10);
+    const stepRate = (m, p) => Math.abs(m.pos - p.pos) / m.int * 1000;
+    check('playback carries on in 50 ms steps', after.every(m => m.int === 50), after.slice(0, 3));
+    check('no step faster than the sine', after.slice(1).every((m, i) => stepRate(m, after[i]) <= 3142 * 1.05));
+    t += 1000;
+    const lastPos = after[after.length - 1].pos;
+    // A 30 s pause: the clock holds, so it picks up next to where it stopped, with a slow rejoin.
+    const resumed = run(t + 30000, 1, 10);
+    check('after a pause: a slow rejoin move', resumed[0].int === 500, resumed[0]);
+    // The rejoin aims 500 ms ahead: at 0.1 Hz that's at most ~1600 units from where it stopped.
+    // On the old video clock, a 30 s jump landed anywhere in the cycle.
+    check('after a pause: picks up near where it stopped', Math.abs(resumed[0].pos - lastPos) <= 3142 * 0.55, { lastPos, pos: resumed[0].pos });
+}
 
 console.log(fails ? fails + ' FAILED' : 'all passed');
 process.exit(fails ? 1 : 0);
