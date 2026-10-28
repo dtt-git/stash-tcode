@@ -6,7 +6,7 @@
 (function(){
 
 // --- HOST ---
-const TCODE_VERSION = '1.1.0'; // keep in step with version: in stash-tcode.yml
+const TCODE_VERSION = '1.1.1'; // keep in step with version: in stash-tcode.yml
 const PLUGIN_ID = 'stash-tcode';
 const STORE_PREFIX = 'stash-tcode:';
 // Settings the retired Tampermonkey userscript leaves here when it finds this plugin installed.
@@ -1699,6 +1699,17 @@ function startHud(){
 // plain same-origin fetch: the browser attaches Stash's session cookie when it has a
 // login, and no cross-site request permission is needed.
 
+// Stash's address for a path on it: stashUrl('graphql') is origin + '/graphql', or
+// origin + '/stash/graphql' when Stash is served under a subpath (a reverse proxy at /stash/).
+// Stash then rewrites its page's <base href> to that prefix, and builds its own API URL the
+// same way.
+function stashUrl(path){
+    var href = document.querySelector('base') && document.querySelector('base').getAttribute('href');
+    var base = href ? new URL(href, location.href).pathname : '/';
+    if(!base.endsWith('/')){ base += '/'; }
+    return location.origin + base + path.replace(/^\//, '');
+}
+
 // `url` resolved against the page, or null when it points at another site. Script URLs
 // can come from the page itself (the Interactive Tools dropdown), so never follow one
 // off-site with the user's cookies.
@@ -1718,7 +1729,7 @@ function getStashText(url){
 
 // Stash's own address for the scene's main funscript.
 function defaultFunscriptUrl(){
-    return location.origin + '/scene/' + getSceneId() + '/funscript';
+    return stashUrl('scene/' + getSceneId() + '/funscript');
 }
 
 // --- STASH GRAPHQL ---
@@ -1726,7 +1737,7 @@ function defaultFunscriptUrl(){
 // HttpOnly (invisible to document.cookie), so this also works when Stash has a login.
 // keepalive lets a request sent while the page closes still finish.
 function stashGql(query, variables, keepalive){
-    return fetch(location.origin + '/graphql', {
+    return fetch(stashUrl('graphql'), {
         method: 'POST',
         credentials: 'same-origin',
         keepalive: !!keepalive,
