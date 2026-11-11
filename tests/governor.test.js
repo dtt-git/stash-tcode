@@ -8,7 +8,7 @@ const section = src.slice(start, end);
 
 // Minimal stand-ins for the script globals the section touches.
 const env = `
-var settings = { sync: 0, hr: { enabled: true, edgeHr: 140, band: 10, floor: 30, rejoinSec: 8,
+var settings = { sync: 0, hr: { enabled: true, edgeHr: 140, band: 10, floor: 30, releaseBpm: 5, rejoinSec: 8,
     timeoutSec: 8, decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105, climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15 },
     axes: { R0: { autoCenter: true } } };
 var hr = { bpm: null, at: 0, status: 'live' };
@@ -18,7 +18,7 @@ function showToast(t){ toasts.push(t); } function debug(){}
 function getCenter(){ return 5000; }
 `;
 const api = new Function(env + section + `
-return { limitSpeed, sinePosition, workingCeiling, approachFactor, rejoinFactor, climaxFactor, updateEdgeState, computeAllowance, shapePosition,
+return { limitSpeed, sinePosition, workingCeiling, decaySteps, approachFactor, rejoinFactor, climaxFactor, updateEdgeState, computeAllowance, shapePosition,
          hrSession, settings, hr, setMarks: (m) => { climaxMarksMs = m; }, toasts: () => toasts };`)();
 
 let fails = 0;
@@ -37,17 +37,34 @@ check('band 0 = 1', api.approachFactor(139, 140, 0, 30) === 1);
 // --- hysteresis: 140 sets, 136 holds, 134 releases ---
 {
     const s = { edged: false, edges: 0, releasedAt: null };
-    const e1 = api.updateEdgeState(s, 140, 140, false, 1000);
-    const held = api.updateEdgeState(s, 136, 140, false, 2000);
+    const e1 = api.updateEdgeState(s, 140, 140, false, 1000, 5);
+    const held = api.updateEdgeState(s, 136, 140, false, 2000, 5);
     const edgedAfterHold = s.edged;
-    const e2 = api.updateEdgeState(s, 140, 140, false, 2500); // still edged: not a second edge
-    const rel = api.updateEdgeState(s, 134, 140, false, 3000);
+    const e2 = api.updateEdgeState(s, 140, 140, false, 2500, 5); // still edged: not a second edge
+    const rel = api.updateEdgeState(s, 134, 140, false, 3000, 5);
     check('140 triggers edge', e1 === 'edge' && s.edges === 1, { e1, s });
     check('136 holds', held === null && edgedAfterHold === true);
     check('no double count while edged', e2 === null && s.edges === 1);
     check('134 releases', rel === 'release' && s.edged === false && s.releasedAt === 3000);
     const c = { edged: false, edges: 0, releasedAt: null };
-    check('no edge counted during climax', api.updateEdgeState(c, 150, 140, true, 0) === null && c.edges === 0);
+    check('no edge counted during climax', api.updateEdgeState(c, 150, 140, true, 0, 5) === null && c.edges === 0);
+}
+// --- recovery drop 0: 1 BPM under the ceiling clears the edge, and climbing back is a new edge ---
+{
+    const s = { edged: false, edges: 0, releasedAt: null };
+    api.updateEdgeState(s, 140, 140, false, 1000, 0);
+    const held = api.updateEdgeState(s, 140, 140, false, 2000, 0);
+    const heldEdges = s.edges;
+    const rel = api.updateEdgeState(s, 139, 140, false, 3000, 0);
+    const again = api.updateEdgeState(s, 140, 140, false, 4000, 0);
+    check('drop 0: still at ceiling holds', held === null && heldEdges === 1);
+    check('drop 0: 1 under releases', rel === 'release' && s.releasedAt === 3000);
+    check('drop 0: back at ceiling is edge 2', again === 'edge' && s.edges === 2);
+    const t = { edged: true, edges: 1, releasedAt: null };
+    check('drop 10: 130 holds, 129 releases', api.updateEdgeState(t, 130, 140, false, 0, 10) === null
+        && api.updateEdgeState(t, 129, 140, false, 1, 10) === 'release');
+    const u = { edged: true, edges: 1, releasedAt: null };
+    check('missing drop treated as 0', api.updateEdgeState(u, 139, 140, false, 0) === 'release');
 }
 
 // --- decay ---
@@ -60,11 +77,28 @@ check('6 edges: 134', wc(6).ceiling === 134);
 check('floor stops decay at 105', wc(100).ceiling === 105 && wc(100).decay === 35);
 check('floor never raises a low ceiling', wc(10, { edgeHr: 95 }).ceiling === 95);
 check('decay off', wc(10, { decay: false }).ceiling === 140);
+// Speeding up, every 5: drops land on edges 5, 9, 12, 14, 15, then every edge.
+const steps = (edges, every) => api.decaySteps(edges, every, true);
+check('accel: no drop before the first 5', steps(4, 5) === 0 && steps(5, 5) === 1);
+check('accel: second drop after 4 more', steps(8, 5) === 1 && steps(9, 5) === 2);
+check('accel: then 3, 2, 1', steps(12, 5) === 3 && steps(14, 5) === 4 && steps(15, 5) === 5);
+check('accel: every edge once it reaches 1', steps(16, 5) === 6 && steps(20, 5) === 10);
+check('accel: every 1 is just every edge', steps(7, 1) === 7);
+check('steady: unchanged', api.decaySteps(9, 5, false) === 1 && api.decaySteps(10, 5, false) === 2);
+// With a fastest step of 2: drops land on edges 5, 9, 12, 14, then every 2 (16, 18, ...).
+const capped = (edges, every, fastest) => api.decaySteps(edges, every, true, fastest);
+check('accel, fastest 2: same until it gets there', capped(14, 5, 2) === 4 && capped(15, 5, 2) === 4);
+check('accel, fastest 2: then every 2 edges', capped(16, 5, 2) === 5 && capped(17, 5, 2) === 5 && capped(18, 5, 2) === 6);
+check('accel, fastest at or above every: steady', capped(10, 5, 5) === 2 && capped(14, 5, 8) === 2);
+check('accel ceiling with fastest 2', wc(18, { decayEvery: 5, decayAccel: true, decayAccelMin: 2 }).ceiling === 128);
+check('accel ceiling: 9 edges at every 5 = 2 drops', wc(9, { decayEvery: 5, decayAccel: true }).ceiling === 136);
+check('accel still stops at the floor', wc(100, { decayEvery: 5, decayAccel: true }).ceiling === 105);
 
 // --- rejoin ---
 check('rejoin none = 1', api.rejoinFactor(null, 8) === 1);
-check('rejoin start = 0.16', near(api.rejoinFactor(0, 8), 0.16));
-check('rejoin half = 0.58', near(api.rejoinFactor(4, 8), 0.58));
+check('rejoin starts from nothing', api.rejoinFactor(0, 8) === 0);
+check('rejoin half = 0.5', near(api.rejoinFactor(4, 8), 0.5));
+check('rejoin is a constant pace', near(api.rejoinFactor(2, 8), 0.25) && near(api.rejoinFactor(6, 8), 0.75));
 check('rejoin done = 1', near(api.rejoinFactor(8, 8), 1) && near(api.rejoinFactor(20, 8), 1));
 check('rejoin 0 s = 1', api.rejoinFactor(0, 0) === 1);
 
@@ -94,13 +128,17 @@ g = at(140, now + 2000);
 check('edge at ceiling', g.a === 0 && g.phase === 'EDGE' && api.hrSession.edges === 1, g);
 check('edge toast shown', api.toasts().length === 1);
 g = at(134, now + 3000);
-check('release starts rejoin', g.phase === 'REJOINING' && near(g.a, 0.16), g);
+check('release starts rejoin', g.phase === 'REJOINING' && g.a === 0 && g.blend === 0 && near(g.shape, 0.72), g);
 g = at(120, now + 7000);
-check('rejoin halfway', near(g.a, 0.58) && g.label === 'REJOINING 4 s', g);
+check('rejoin halfway', near(g.a, 0.5) && near(g.blend, 0.5) && g.label === 'REJOINING 4 s', g);
 g = at(120, now + 12000);
 check('rejoin finished', g.a === 1 && g.phase === 'FREE' && api.hrSession.releasedAt === null, g);
 g = api.computeAllowance(now + 12000 + 9000, null);
 check('watchdog: stale reading stops', g.a === 0 && g.phase === 'NO SIGNAL', g);
+g = at(120, now + 22000);
+check('signal back: rejoins like after an edge', g.phase === 'REJOINING' && g.a === 0 && api.hrSession.releasedAt === now + 22000, g);
+g = at(120, now + 26000);
+check('...over the rejoin time', near(g.blend, 0.5) && g.phase === 'REJOINING', g);
 api.hr.status = 'off';
 g = api.computeAllowance(now + 30000, null);
 check('no monitor plays normally', g.a === 1 && g.phase === 'NO MONITOR', g);

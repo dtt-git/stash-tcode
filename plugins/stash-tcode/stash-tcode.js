@@ -6,7 +6,7 @@
 (function(){
 
 // --- HOST ---
-const TCODE_VERSION = '1.1.1'; // keep in step with version: in stash-tcode.yml
+const TCODE_VERSION = '1.2.0'; // keep in step with version: in stash-tcode.yml
 const PLUGIN_ID = 'stash-tcode';
 const STORE_PREFIX = 'stash-tcode:';
 // Settings the retired Tampermonkey userscript leaves here when it finds this plugin installed.
@@ -219,8 +219,8 @@ function loadSettings(stored){
                            "axes": { L0: axisDefaults(true), L1: axisDefaults(false), L2: axisDefaults(false),
                                      R0: axisDefaults(false), R1: axisDefaults(false), R2: axisDefaults(false) },
                            "hr": { deviceId: null, deviceName: null, enabled: false,
-                                   edgeHr: 140, band: 10, floor: 30, rejoinSec: 8, timeoutSec: 8,
-                                   decay: true, decayEvery: 2, decayBpm: 2, decayFloor: 105,
+                                   edgeHr: 140, band: 10, floor: 30, releaseBpm: 5, rejoinSec: 8, timeoutSec: 8,
+                                   decay: true, decayEvery: 2, decayAccel: false, decayAccelMin: 1, decayBpm: 2, decayFloor: 105,
                                    climax: true, climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15, climaxTag: "Climax" },
                            "currentVersion": thisVersion};
     settings = stored !== undefined ? stored : importUserscriptSettings(storeGet("settings", null));
@@ -995,20 +995,40 @@ function buildHrTab(body){
         uiRange('hrBand', cfg.band, {min: 0, max: 40, format: bpm}, null, function(v){ cfg.band = v; changed(); }).el);
     uiSetting(resp, "Shortest stroke", "Stroke length just below the ceiling, as a share of the full range.",
         uiRange('hrFloor', cfg.floor, {min: 0, max: 100, format: function(v){ return v + "%"; }}, null, function(v){ cfg.floor = v; changed(); }).el);
-    uiSetting(resp, "Rejoin time", "After an edge, strokes ramp back to full over this long.",
+    uiSetting(resp, "Recovery drop", "After an edge, strokes resume once you're more than this many BPM under the ceiling.",
+        uiRange('hrRelease', cfg.releaseBpm, {min: 0, max: 20, format: bpm}, null, function(v){ cfg.releaseBpm = v; changed(); }).el);
+    uiSetting(resp, "Rejoin time", "After an edge, motion eases back into the script over this long.",
         uiRange('hrRejoin', cfg.rejoinSec, {min: 0, max: 60, format: sec}, null, function(v){ cfg.rejoinSec = v; changed(); }).el);
     uiSetting(resp, "Signal timeout", "If the monitor sends no real reading for this long (disconnected, or taken off), the device stops.",
         uiRange('hrTimeout', cfg.timeoutSec, {min: 3, max: 20, format: sec}, null, function(v){ cfg.timeoutSec = v; changed(); }).el);
 
-    var decay = uiSection(body, "Adaptive ceiling decay", "Lowers the ceiling as edges add up, to counter fatigue over a long session.");
+    var decay = uiSection(body, "Edge decay", "Lowers the ceiling as edges add up to counter fatigue over a long session.");
     var decayRows = [];
     uiSetting(decay, "Enable", null, uiSwitch('hrDecay', cfg.decay, function(v){
         cfg.decay = v;
         decayRows.forEach(function(r){ r.classList.toggle('disabled', !v); });
         changed();
     }));
+    // "Fewer edges each step", spelled out with the numbers set around it.
+    var accelHint = function(){
+        var every = Math.max(1, cfg.decayEvery), least = Math.max(1, cfg.decayAccelMin || 1);
+        if(every <= least){ return "The ceiling drops every " + every + (every === 1 ? " edge" : " edges") + ", already the fewest allowed."; }
+        var seq = [every];
+        while(seq.length < 3 && seq[seq.length - 1] > least){ seq.push(seq[seq.length - 1] - 1); }
+        return "The ceiling drops after " + every + " edges, then " + seq.slice(1).join(", then ") +
+               (seq[seq.length - 1] > least ? ", and so on." : " from then on.");
+    };
+    var accelRow, fastest;
+    var syncAccel = function(){ accelRow.querySelector('.sub-heading').textContent = accelHint(); };
     decayRows.push(uiSetting(decay, "Every", "Number of edges per step.",
-        uiNumber('decayEvery', cfg.decayEvery, {min: 1, max: 10, suffix: "edges"}, function(v){ cfg.decayEvery = v; changed(); }), {sub: true}));
+        uiNumber('decayEvery', cfg.decayEvery, {min: 1, max: 10, suffix: "edges"}, function(v){ cfg.decayEvery = v; syncAccel(); changed(); }), {sub: true}));
+    accelRow = uiSetting(decay, "Fewer edges each step", accelHint(),
+        uiSwitch('decayAccel', cfg.decayAccel, function(v){ cfg.decayAccel = v; fastest.classList.toggle('off', !v); changed(); }), {sub: true});
+    decayRows.push(accelRow);
+    fastest = uiSetting(decay, "Minimum", "Steps never take fewer edges than this.",
+        uiNumber('decayAccelMin', cfg.decayAccelMin, {min: 1, max: 10, suffix: "edges"}, function(v){ cfg.decayAccelMin = v; syncAccel(); changed(); }), {sub: true, dep: true});
+    fastest.classList.toggle('off', !cfg.decayAccel);
+    decayRows.push(fastest);
     decayRows.push(uiSetting(decay, "Drop by", "How much the ceiling falls each step.",
         uiNumber('decayBpm', cfg.decayBpm, {min: 1, max: 5, suffix: "BPM"}, function(v){ cfg.decayBpm = v; changed(); }), {sub: true}));
     decayRows.push(uiSetting(decay, "Floor", "The ceiling never decays below this.",
@@ -1557,9 +1577,13 @@ function publishDebugApi(){
 // --- STATS OVERLAY ---
 // A small panel over the video: heart rate, ceiling, edges, the governor's phase and
 // allowance, and the next climax marker. It lives inside the video.js container so it
-// stays visible in fullscreen, ignores the mouse, and refreshes at 4 Hz.
+// stays visible in fullscreen, and refreshes 20 times a second, so the bar keeps up with
+// the motion it describes. The stats ignore the mouse. Controls
+// (edge BPM −/+, climax markers on/off, heart-rate modulation on/off) show while the mouse
+// moves over the player or rests on the controls, and hide again after.
 
 var hudTimer = null;
+var HUD_REFRESH_MS = 50;
 var HUD_COLORS = { ok: "#3dcc91", warn: "#ffb366", stop: "#ff7373", climax: "#48aff0", off: "#bfccd6" };
 
 function injectHudStyles(){
@@ -1578,11 +1602,23 @@ function injectHudStyles(){
 #tcode-hud .hud-decay { color: #ffb366; font-size: 11px; }
 #tcode-hud .hud-label { font-weight: 600; letter-spacing: .03em; }
 #tcode-hud .hud-bar { height: 4px; margin: 4px 0 5px; border-radius: 2px; background: rgba(245,248,250,.18); overflow: hidden; }
-#tcode-hud .hud-fill { height: 100%; width: 0; transition: width .2s linear, background-color .2s; }
-#tcode-hud .hud-meta { display: flex; align-items: center; gap: 8px; color: #bfccd6; font-size: 11px; }
+#tcode-hud .hud-fill { height: 100%; width: 0; transition: width .05s linear, background-color .2s; }
+#tcode-hud .hud-meta { display: flex; align-items: center; gap: 8px; min-height: 15px; color: #bfccd6; font-size: 11px; }
 #tcode-hud .hud-dots { margin-left: auto; display: inline-flex; gap: 4px; }
 #tcode-hud .hud-dot { width: 6px; height: 6px; border-radius: 50%; background: #ff7373; }
 #tcode-hud .hud-dot.on { background: #3dcc91; }
+#tcode-hud .hud-controls { display: none; pointer-events: auto; flex-direction: column; gap: 5px;
+             margin-top: 7px; padding-top: 7px; border-top: 1px solid rgba(245,248,250,.15); }
+#tcode-hud.active .hud-controls, #tcode-hud .hud-controls:hover, #tcode-hud .hud-controls:focus-within { display: flex; }
+#tcode-hud .hud-row { display: flex; align-items: center; gap: 5px; }
+#tcode-hud .hud-btn { flex: 1; min-width: 28px; height: 26px; padding: 0 8px; border: 1px solid rgba(245,248,250,.25);
+             border-radius: 3px; background: rgba(245,248,250,.1); color: #f5f8fa; font: inherit; font-size: 12px;
+             line-height: 1; cursor: pointer; text-shadow: none; white-space: nowrap; }
+#tcode-hud .hud-btn:hover { background: rgba(245,248,250,.22); }
+#tcode-hud .hud-btn:disabled { opacity: .4; cursor: default; }
+#tcode-hud .hud-btn:focus-visible { outline: 2px solid #48aff0; outline-offset: 1px; }
+#tcode-hud .hud-btn[aria-pressed="true"] { border-color: #48aff0; background: rgba(72,175,240,.35); }
+#tcode-hud .hud-limiter[aria-pressed="false"] { border-color: #ffb366; color: #ffb366; }
 @keyframes tcode-beat { 0%, 60%, 100% { transform: scale(1); } 20% { transform: scale(1.25); } }
 `;
     document.head.appendChild(s);
@@ -1601,24 +1637,106 @@ function ensureHud(){
     if(hud && hud.parentNode !== host){ hud.remove(); hud = null; }
     if(!hud){
         injectHudStyles();
-        hud = el('div', {id: 'tcode-hud', 'aria-hidden': 'true'}, [
-            el('div', {class: 'hud-top'}, [
-                el('span', {class: 'hud-heart', text: '♥'}),
-                el('span', {class: 'hud-bpm'}),
-                el('span', {class: 'hud-ceiling'}),
-                el('span', {class: 'hud-decay'})
+        hud = el('div', {id: 'tcode-hud'}, [
+            el('div', {'aria-hidden': 'true'}, [
+                el('div', {class: 'hud-top'}, [
+                    el('span', {class: 'hud-heart', text: '♥'}),
+                    el('span', {class: 'hud-bpm'}),
+                    el('span', {class: 'hud-ceiling'}),
+                    el('span', {class: 'hud-decay'})
+                ]),
+                el('div', {class: 'hud-label'}),
+                el('div', {class: 'hud-bar'}, [el('div', {class: 'hud-fill'})]),
+                el('div', {class: 'hud-meta'}, [
+                    el('span', {class: 'hud-edges'}),
+                    el('span', {class: 'hud-climax'}),
+                    el('span', {class: 'hud-dots'}, [el('span', {class: 'hud-dot usb', title: 'Device'}), el('span', {class: 'hud-dot hr', title: 'Heart rate'})])
+                ])
             ]),
-            el('div', {class: 'hud-label'}),
-            el('div', {class: 'hud-bar'}, [el('div', {class: 'hud-fill'})]),
-            el('div', {class: 'hud-meta'}, [
-                el('span', {class: 'hud-edges'}),
-                el('span', {class: 'hud-climax'}),
-                el('span', {class: 'hud-dots'}, [el('span', {class: 'hud-dot usb', title: 'Device'}), el('span', {class: 'hud-dot hr', title: 'Heart rate'})])
-            ])
+            buildHudControls()
         ]);
         host.appendChild(hud);
     }
     return hud;
+}
+
+var EDGE_HR_MIN = 50, EDGE_HR_MAX = 250; // same bounds as the Edge box on the Heart Rate tab
+
+function buildHudControls(){
+    var btn = function(cls, text, label, onClick){
+        return el('button', {type: 'button', class: 'hud-btn ' + cls, text: text, title: label, 'aria-label': label,
+            // Clicking mustn't leave focus on the button: Stash's Space-to-pause would press it again.
+            onmousedown: function(e){ e.preventDefault(); },
+            onclick: function(e){ e.stopPropagation(); onClick(); updateHud(); }});
+    };
+    var stop = function(e){ e.stopPropagation(); }; // keep clicks from reaching the player
+    return el('div', {class: 'hud-controls', role: 'group', 'aria-label': 'Stash-TCode controls',
+                      onclick: stop, ondblclick: stop, onpointerdown: stop}, [
+        el('div', {class: 'hud-row'}, [
+            btn('hud-down', 'BPM −', 'Lower edge BPM by 1', function(){ nudgeEdgeHr(-1); }),
+            btn('hud-up', 'BPM +', 'Raise edge BPM by 1', function(){ nudgeEdgeHr(1); })
+        ]),
+        el('div', {class: 'hud-row'}, [
+            btn('hud-markers', '', 'Climax markers on or off', function(){ setClimaxMarkersEnabled(settings.hr.climax === false); }),
+            btn('hud-limiter', '', 'Heart-rate modulation on or off', function(){ setHrModulation(!settings.hr.enabled); })
+        ])
+    ]);
+}
+
+// The overlay's controls change the same settings as the dialog, so keep it in step.
+function nudgeEdgeHr(delta){
+    var cfg = settings.hr;
+    var v = Math.min(EDGE_HR_MAX, Math.max(EDGE_HR_MIN, (parseInt(cfg.edgeHr) || 0) + delta));
+    if(v === cfg.edgeHr){ return; }
+    cfg.edgeHr = v;
+    saveSettings();
+    refreshGovernor();
+    refreshSettingsTab('hr');
+}
+
+function setClimaxMarkersEnabled(on){
+    settings.hr.climax = on;
+    saveSettings();
+    refreshGovernor();
+    refreshSettingsTab('climax');
+}
+
+// Same as Enable on the Heart Rate tab.
+function setHrModulation(on){
+    settings.hr.enabled = on;
+    saveSettings();
+    refreshGovernor();
+    updateHrUi();
+    refreshSettingsTab('hr');
+}
+
+// The controls show while the mouse moves over the player (fullscreen included), and for
+// a moment after. Tracked here rather than through video.js's own activity classes, so it
+// doesn't depend on the player version.
+var HUD_ACTIVE_MS = 2500;
+var hudActiveTimer = null;
+function watchHudActivity(){
+    var wake = function(e){
+        var hud = document.getElementById('tcode-hud');
+        if(!hud || !hud.parentNode || !hud.parentNode.contains(e.target)){ return; }
+        hud.classList.add('active');
+        clearTimeout(hudActiveTimer);
+        hudActiveTimer = setTimeout(function(){ hud.classList.remove('active'); }, HUD_ACTIVE_MS);
+    };
+    document.addEventListener('pointermove', wake, true);
+    document.addEventListener('pointerdown', wake, true);
+}
+
+function updateHudControls(hud){
+    var cfg = settings.hr;
+    q(hud, '.hud-down').disabled = cfg.edgeHr <= EDGE_HR_MIN;
+    q(hud, '.hud-up').disabled = cfg.edgeHr >= EDGE_HR_MAX;
+    var markers = q(hud, '.hud-markers');
+    markers.textContent = cfg.climax === false ? "Climax off" : "Climax on";
+    markers.setAttribute('aria-pressed', String(cfg.climax !== false));
+    var limiter = q(hud, '.hud-limiter');
+    limiter.textContent = cfg.enabled ? "Limiter on" : "Limiter off";
+    limiter.setAttribute('aria-pressed', String(!!cfg.enabled));
 }
 
 function phaseColor(g){
@@ -1666,22 +1784,22 @@ function updateHud(){
     var label = q(hud, '.hud-label');
     label.textContent = modulating ? g.label : (hrLive() ? "Modulation off" : "No monitor");
     label.style.color = color;
-    var bar = q(hud, '.hud-bar');
-    bar.style.display = modulating ? "" : "none";
-    if(modulating){
-        var fill = q(hud, '.hud-fill');
-        fill.style.width = Math.round(g.a * 100) + "%";
-        fill.style.backgroundColor = color;
-    }
+    // The bar stays (empty) with modulation off, so the overlay keeps its height and the
+    // controls under it don't jump away from the mouse when the limiter is toggled.
+    var fill = q(hud, '.hud-fill');
+    fill.style.width = modulating ? Math.round(g.a * 100) + "%" : "0";
+    fill.style.backgroundColor = color;
 
     q(hud, '.hud-edges').textContent = modulating ? hrSession.edges + (hrSession.edges === 1 ? " edge" : " edges") : "";
     q(hud, '.hud-climax').textContent = modulating && g.phase !== 'CLIMAX' ? nextClimaxText(currentSceneMs()) : "";
     q(hud, '.hud-dot.usb').classList.toggle('on', serialConnected);
     q(hud, '.hud-dot.hr').classList.toggle('on', hrLive());
+    updateHudControls(hud);
 }
 
 function startHud(){
     if(hudTimer){ return; }
+    watchHudActivity();
     hudTimer = setInterval(function(){
         try {
             // Keep the governor current while paused too (watchdog, edges, the dialog's
@@ -1689,7 +1807,7 @@ function startHud(){
             if(!boundPlayer || boundPlayer.paused){ refreshGovernor(); } else { updateGovUi(); }
             updateHud();
         } catch(e) { debug("[TCode] HUD update failed: " + e); }
-    }, 250);
+    }, HUD_REFRESH_MS);
 }
 
 // ---------------------------------
@@ -2077,15 +2195,16 @@ function fetchFunscript(axis, force=false){
 // reimplemented here:
 //   - Approach band: in the last `band` BPM below the ceiling, `a` falls linearly from
 //     1 to the floor, so strokes shorten as you climb.
-//   - Edge: at the ceiling `a` is 0 (the stroker parks at the bottom of its range) until
-//     HR drops EDGE_RELEASE_BPM below it, then ramps back in over `rejoinSec`.
-//   - Adaptive decay: every N edges the ceiling drops M BPM, never below a floor.
+//   - Edge: at the ceiling `a` is 0 and every axis stops where it is (see HOLD) until
+//     HR is more than `releaseBpm` below it, then eases back into the script from there
+//     over `rejoinSec`.
+//   - Edge decay: every N edges the ceiling drops M BPM, never below a floor. With
+//     `decayAccel`, each drop takes one edge fewer than the last (N, N-1, ...), down to
+//     every `decayAccelMin` edges.
 //   - Climax marks: around a marked time `a` is lifted toward 1 regardless of HR.
 //   - Watchdog: with modulation on and no fresh reading, `a` is 0.
 // The pure functions below take everything as arguments so they can be tested alone.
 
-var EDGE_RELEASE_BPM = 5;   // hysteresis: an edge only clears this far below the ceiling
-var REJOIN_START = 0.16;    // allowance at the moment an edge clears
 
 // The session (edge count, which drives decay; whether we're at the edge; when the last
 // edge cleared) is kept in sessionStorage: it survives a page reload, say when another
@@ -2094,13 +2213,30 @@ var HR_SESSION_KEY = 'stash-tcode:hrSession';
 var hrSession = loadHrSession();
 var climaxMarksMs = [];     // climax mark times for the current scene (scene ms)
 var lastGov = null;         // most recent governor result, for the UI
+var signalLost = false;     // the watchdog stopped the device; rejoin when readings return
 
-// The ceiling after adaptive decay. The floor can stop the decay but never raise the
+// How many times the ceiling has dropped after `edges` edges. Normally once every `every`
+// edges. Accelerating, each drop takes one edge fewer than the last, down to every
+// `fastest` edges (1 if not given): edges late in a session count for more than the first few.
+function decaySteps(edges, every, accel, fastest){
+    every = Math.max(1, Math.floor(every) || 1);
+    if(!accel){ return Math.floor(edges / every); }
+    fastest = Math.max(1, Math.floor(fastest) || 1);
+    var steps = 0, need = every;
+    while(edges >= need){
+        edges -= need;
+        steps++;
+        if(need > fastest){ need--; }
+    }
+    return steps;
+}
+
+// The ceiling after edge decay. The floor can stop the decay but never raise the
 // ceiling above the edge HR you set. Returns {ceiling, decay}.
 function workingCeiling(cfg, edges){
     var typed = cfg.edgeHr;
     if(!cfg.decay || !(edges > 0)){ return { ceiling: typed, decay: 0 }; }
-    var drop = Math.floor(edges / Math.max(1, cfg.decayEvery)) * cfg.decayBpm;
+    var drop = decaySteps(edges, cfg.decayEvery, cfg.decayAccel, cfg.decayAccelMin) * cfg.decayBpm;
     var ceiling = Math.min(typed, Math.max(cfg.decayFloor, typed - drop));
     return { ceiling: ceiling, decay: typed - ceiling };
 }
@@ -2112,13 +2248,13 @@ function approachFactor(bpm, ceiling, band, floorPct){
     return 1 - s * (1 - floorPct / 100);
 }
 
-// Cap on the allowance `sinceSec` seconds after an edge cleared: eases from REJOIN_START
-// up to 1 over rejoinSec. No ramp running (null) or a zero-length ramp is 1.
+// How far motion has rejoined the script `sinceSec` seconds after an edge cleared: from 0
+// up to 1 over rejoinSec at a constant pace, and that time is all that decides it. (It is
+// also what the overlay's bar shows, so the bar fills evenly with the countdown.) No ramp
+// running (null) or a zero-length ramp is 1: straight back onto the script.
 function rejoinFactor(sinceSec, rejoinSec){
     if(sinceSec == null || !(rejoinSec > 0)){ return 1; }
-    var t = Math.max(0, Math.min(1, sinceSec / rejoinSec));
-    var eased = t * t * (3 - 2 * t); // smoothstep
-    return REJOIN_START + (1 - REJOIN_START) * eased;
+    return Math.max(0, Math.min(1, sinceSec / rejoinSec));
 }
 
 // How far climax marks have taken over at sceneMs, 0-1: climbs over rampMs before a
@@ -2159,15 +2295,17 @@ function saveHrSession(){
 }
 
 // Advance the edge state machine for one reading. Rising through the ceiling counts an
-// edge (but not while a climax mark has taken over); it clears below the release band.
-function updateEdgeState(session, bpm, ceiling, climaxActive, now){
+// edge (but not while a climax mark has taken over); it clears once HR is more than
+// `release` BPM below the ceiling (0: anything under it).
+function updateEdgeState(session, bpm, ceiling, climaxActive, now, release){
+    release = release > 0 ? release : 0;
     if(bpm >= ceiling){
         if(!session.edged && !climaxActive){
             session.edged = true;
             session.edges++;
             return 'edge';
         }
-    }else if(session.edged && bpm < ceiling - EDGE_RELEASE_BPM){
+    }else if(session.edged && bpm < ceiling - release){
         session.edged = false;
         session.releasedAt = now;
         return 'release';
@@ -2175,11 +2313,14 @@ function updateEdgeState(session, bpm, ceiling, climaxActive, now){
     return null;
 }
 
-// The governor for this moment. Returns {a, phase, label, ceiling, decay, climax, bpm}.
+// The governor for this moment. Returns {a, shape, blend, phase, label, ceiling, decay, climax, bpm}.
 //   phase: OFF | NO MONITOR | NO SIGNAL | FREE | EASING | EDGE | REJOINING | CLIMAX
+//   a:     how much of the script gets through, for the UI. Motion uses its two parts:
+//   shape: how far the approach band shortens strokes (1: not at all);
+//   blend: after an edge, how far motion has rejoined the script from where it stopped.
 function computeAllowance(now, sceneMs){
     var cfg = settings.hr;
-    var res = { a: 1, phase: 'OFF', label: 'OFF', ceiling: null, decay: 0, climax: 0, bpm: hr.bpm };
+    var res = { a: 1, shape: 1, blend: 1, phase: 'OFF', label: 'OFF', ceiling: null, decay: 0, climax: 0, bpm: hr.bpm };
     if(!cfg.enabled){ return res; }
     var wc = workingCeiling(cfg, hrSession.edges);
     res.ceiling = wc.ceiling;
@@ -2194,24 +2335,31 @@ function computeAllowance(now, sceneMs){
     }
     if(hr.bpm == null || now - hr.at > cfg.timeoutSec * 1000){
         // Watchdog: a monitor that has gone quiet stops the device.
-        res.a = 0;
+        res.a = res.shape = 0;
         res.phase = res.label = 'NO SIGNAL';
+        signalLost = true;
         return res;
     }
+    if(signalLost){
+        // The signal is back: rejoin from where the device stopped, like after an edge.
+        signalLost = false;
+        if(!hrSession.edged){ hrSession.releasedAt = now; saveHrSession(); }
+    }
 
-    var event = updateEdgeState(hrSession, hr.bpm, wc.ceiling, res.climax > 0, now);
+    var event = updateEdgeState(hrSession, hr.bpm, wc.ceiling, res.climax > 0, now, cfg.releaseBpm);
     if(event){ saveHrSession(); }
-    if(event === 'edge'){ onEdge(); }
+    if(event === 'edge'){ onEdge(wc.ceiling - (cfg.releaseBpm > 0 ? cfg.releaseBpm : 0)); }
 
-    var base;
+    var base, shape, blend = 1;
     if(hrSession.edged){
-        base = 0;
+        base = shape = 0;
         res.phase = res.label = 'EDGE';
     }else{
-        base = approachFactor(hr.bpm, wc.ceiling, cfg.band, cfg.floor);
+        base = shape = approachFactor(hr.bpm, wc.ceiling, cfg.band, cfg.floor);
         res.phase = base < 1 ? 'EASING' : 'FREE';
         var since = hrSession.releasedAt != null ? (now - hrSession.releasedAt) / 1000 : null;
         var r = rejoinFactor(since, cfg.rejoinSec);
+        blend = r;
         if(r < base){
             base = r;
             res.phase = 'REJOINING';
@@ -2225,19 +2373,23 @@ function computeAllowance(now, sceneMs){
     }
     if(res.climax > 0){
         base = base + (1 - base) * res.climax;
+        shape = shape + (1 - shape) * res.climax;
+        blend = blend + (1 - blend) * res.climax;
         res.phase = 'CLIMAX';
         res.label = 'CLIMAX ' + Math.round(res.climax * 100) + '%';
     }
     res.a = base;
+    res.shape = shape;
+    res.blend = blend;
     return res;
 }
 
-// The allowance motion actually uses. `a` changes in steps: with each heart-rate reading
-// (about one a second) inside the approach band, and all at once when an edge starts or
-// clears. Applied straight, every shaped axis jumped within a single tick, which a slow
-// twist showed as a stutter after each edge. So motion follows `a` at a capped rate: up
-// gently, down faster so backing off at the edge stays prompt. Losing the monitor's
-// signal still stops at once.
+// What motion actually uses. Inside the approach band the allowance changes in steps, with
+// each heart-rate reading (about one a second). Applied straight, every shaped axis jumped
+// within a single tick, which a slow twist showed as a stutter. So the shortening of
+// strokes (motionA) follows it at a capped rate: up gently, down faster so backing off
+// stays prompt. Rejoining the script after an edge (motionBlend) is not capped: it is
+// already a steady ramp, and the rejoin time alone decides how long it takes.
 var A_RISE_PER_SEC = 0.3;
 var A_FALL_PER_SEC = 0.8;
 
@@ -2249,10 +2401,82 @@ function smoothAllowance(prev, target, dtMs){
 }
 
 var motionA = null, motionAAt = 0;
+var motionBlend = 1;        // 0-1: how far motion has rejoined the script after a hold
 function motionAllowance(gov, now){
-    motionA = gov.phase === 'NO SIGNAL' ? 0 : smoothAllowance(motionA, gov.a, now - motionAAt);
+    var dt = now - motionAAt;
+    motionA = gov.phase === 'NO SIGNAL' ? 0 : smoothAllowance(motionA, gov.shape != null ? gov.shape : gov.a, dt);
+    motionBlend = gov.blend != null ? gov.blend : 1;
     motionAAt = now;
     return motionA;
+}
+
+// --- HOLD ---
+// At an edge, and when the monitor's signal is lost, nothing moves: every axis stops where
+// it is. (Shaping alone would send the stroke to the bottom of its range and the other axes
+// home, which is one more stroke at exactly the wrong moment.) The device is usually
+// mid-move when that happens, so each axis is sent to where it is right now: the script
+// knows every move's start, target and duration, and the device travels between them in a
+// straight line.
+
+var HOLD_SETTLE_MS = 50;    // the stop-in-place move: short, so a small estimate error isn't a twitch
+var motionHeld = false;
+
+// Rejoining after a hold: each axis starts from where it stopped and eases into what the
+// script is doing. A move's target (device units) is blended between the two by
+// motionBlend, which runs from 0 to 1 over the rejoin time. Nothing travels to the bottom
+// of the stroke, or home, first.
+function rejoinBlend(axis, pos){
+    var ax = AXIS[axis];
+    if(ax.holdPos == null){ return pos; }
+    if(motionBlend >= 1){ ax.holdPos = null; return pos; } // rejoined
+    return Math.round(ax.holdPos + (pos - ax.holdPos) * motionBlend);
+}
+
+// Where an axis is at `now` (device units); null when it has never been sent anywhere.
+function axisPositionNow(ax, now){
+    if(ax.lastPos == null){ return null; }
+    if(ax.moveFrom == null || !(ax.moveInt > 0)){ return ax.lastPos; }
+    var t = (now - ax.moveAt) / ax.moveInt;
+    if(t >= 1){ return ax.lastPos; }
+    return Math.round(ax.moveFrom + (ax.lastPos - ax.moveFrom) * Math.max(0, t));
+}
+
+// Record a move as it's sent (a new move starts from wherever the last one had got to).
+function noteMove(axis, to, intervalMs, now){
+    var ax = AXIS[axis];
+    ax.moveFrom = axisPositionNow(ax, now);
+    ax.moveAt = now;
+    ax.moveInt = intervalMs;
+    ax.lastPos = to;
+}
+
+function stopAxesInPlace(now){
+    var line = "";
+    for(var axis in AXIS){
+        var ax = AXIS[axis];
+        if(!settings.axes[axis] || !settings.axes[axis].enabled || ax.limits == null){ continue; }
+        var at = axisPositionNow(ax, now);
+        if(at == null || at === ax.lastPos){ continue; } // never moved, or already at rest
+        noteMove(axis, at, HOLD_SETTLE_MS, now);
+        line += axis + String(at).padStart(4, '0') + "I" + HOLD_SETTLE_MS + " ";
+    }
+    if(line && serialConnected){ sendTCode(line + "\n"); }
+}
+
+// True while motion must stand still; callers send nothing. Going in, stops every axis
+// where it is. Coming out, each axis rejoins the script from wherever it is now (normally
+// where it stopped; somewhere else if it was homed meanwhile).
+function holdMotion(gov, now){
+    var hold = gov.phase === 'EDGE' || gov.phase === 'NO SIGNAL';
+    if(hold && !motionHeld){ stopAxesInPlace(now); }
+    if(!hold && motionHeld){
+        for(var axis in AXIS){ AXIS[axis].holdPos = axisPositionNow(AXIS[axis], now); }
+        motionA = null;     // strokes are as long as the approach band allows, straight away;
+        motionBlend = 0;    // all the easing in is the blend from where the axis is
+        motionAAt = now;
+    }
+    motionHeld = hold;
+    return hold;
 }
 
 // Scale one funscript position (0-100, after invert) by the allowance. Stroke shortens
@@ -2265,8 +2489,9 @@ function shapePosition(axis, pos, a){
     return home + (pos - home) * a;
 }
 
-function onEdge(){
-    showToast("Edge " + hrSession.edges, "Holding until your heart rate drops " + EDGE_RELEASE_BPM + " BPM", "warning", 3000);
+// releaseAt: the heart rate an edge clears under.
+function onEdge(releaseAt){
+    showToast("Edge " + hrSession.edges, "Holding until your heart rate is under " + releaseAt + " BPM", "warning", 3000);
     debug("[TCode] Edge " + hrSession.edges + " at " + hr.bpm + " BPM");
 }
 
@@ -2387,10 +2612,11 @@ function idleTick(){
     // Off a scene page the axes aren't set up yet: take L0's saved range.
     initAxis("L0");
     if(AXIS.L0.limits == null){ AXIS.L0.limits = getLimit("L0", BOTH).slice(0); }
+    var gov = lastGov = computeAllowance(now, null);
+    if(holdMotion(gov, now)){ idleDue = null; return; } // at an edge: stand still
     if(idleDue != null && now < idleDue){ return; }
     var interval = idleDue == null ? SINE_REJOIN_MS : gap; // first move: slow, from wherever it is
     idleDue = now + interval;
-    var gov = lastGov = computeAllowance(now, null);
     emitAxisMove("L0", idlePosition(cfg.idleHz, now + interval, cfg.idleRange), interval, motionAllowance(gov, now));
     move();
 }
@@ -2461,7 +2687,7 @@ function limitSpeed(from, to, intervalMs, maxUps){
 
 // Where each axis was last sent is unknown after (re)connecting.
 function forgetAxisPositions(){
-    for(var ax in AXIS){ AXIS[ax].lastPos = null; }
+    for(var ax in AXIS){ AXIS[ax].lastPos = null; AXIS[ax].moveFrom = null; }
 }
 
 // ---------------------------------
@@ -2509,7 +2735,7 @@ function centerAxis(axis){
         var dist = from != null ? Math.abs(home - from) : Math.max(home, 9999 - home);
         ramp = Math.max(ramp, Math.ceil(dist / (cfg.maxSpeed * 9999) * 1000));
     }
-    AXIS[axis].lastPos = home;
+    noteMove(axis, home, ramp, Date.now());
     sendTCode(axis + String(home).padStart(4, '0') + "I" + ramp + '\n');
 }
 
@@ -2523,7 +2749,7 @@ function queueMove(axis, pos, int){
     if(!serialConnected){ return -1; }
     var lo = parseInt(AXIS[axis].limits[0]);
     var hi = parseInt(AXIS[axis].limits[1]);
-    pos = Math.round(Number(pos));
+    pos = rejoinBlend(axis, Math.round(Number(pos))); // after an edge: ease in from where the axis stopped
     if(pos > hi){ pos = hi; } else if(pos < lo){ pos = lo; }
     pos = clamp9999(pos);
     int = Math.round(Number(int));
@@ -2535,7 +2761,7 @@ function queueMove(axis, pos, int){
         // be outside it; the range is the hard limit.
         if(pos > hi){ pos = hi; } else if(pos < lo){ pos = lo; }
     }
-    AXIS[axis].lastPos = pos;
+    noteMove(axis, pos, int, Date.now());
     // TCode magnitude is the digits after "0." -- send all four so the axis can reach
     // its real endpoints (two digits capped every axis at 0.99 and quantised to 1%).
     var cmd = axis + String(pos).padStart(4, '0') + "I" + int;
@@ -2578,6 +2804,7 @@ function currentAction(ms){
         lastActionMs = ms;
         var now = Date.now();
         var gov = lastGov = computeAllowance(now, ms);
+        if(holdMotion(gov, now)){ return; } // at an edge or with no signal: nothing moves
         var a = motionAllowance(gov, now);
         tickMoves = {};
         for(var x in AXIS){
