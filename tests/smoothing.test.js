@@ -7,20 +7,23 @@ const src = fs.readFileSync(path.join(__dirname, '..', 'plugins', 'stash-tcode',
 const section = src.slice(src.indexOf('// --- HR GOVERNOR ---'), src.indexOf('function clamp9999('));
 
 const env = `
-var settings = { sync: 0, hr: { enabled: true, edgeHr: 133, band: 10, floor: 40, rejoinSec: 8, timeoutSec: 8, decay: false,
+var settings = { sync: 0, hr: { enabled: true, edgeHr: 133, band: 10, floor: 40, releaseBpm: 5, rejoinSec: 8, timeoutSec: 8, decay: false,
     decayEvery: 2, decayBpm: 2, decayFloor: 105, climaxRampSec: 45, climaxHoldSec: 20, climaxEaseSec: 15 },
     axes: { R0: { enabled: true, auto: true, autoHz: 0.1, invert: false, link: "", autoCenter: true } } };
 var AXIS_LIST = ["L0", "L1", "L2", "R0", "R1", "R2"];
 var AXIS = { R0: { limits: [0, 9999], lastPos: null } };
 var hr = { bpm: null, at: 0, status: 'live' };
-var boundPlayer = null, streamOffsetMs = 0, sent = [];
+var boundPlayer = null, streamOffsetMs = 0, sent = [], clock = 0, serialConnected = true;
 var window = { sessionStorage: { getItem: function(){ return null; }, setItem: function(){} } };
 function showToast(){} function debug(){} function updateGovUi(){}
 function getCenter(){ return 5000; }
-function queueMove(axis, pos, int){ sent.push({ pos: Math.round(pos), int: int }); }
+function sendTCode(){}
+// Like the real one: blends in after a hold, and records the move.
+function queueMove(axis, pos, int){ pos = rejoinBlend(axis, Math.round(pos)); sent.push({ pos: pos, int: int }); noteMove(axis, pos, int, clock); }
 `;
 const api = new Function(env + section + `
-return { computeAllowance, motionAllowance, smoothAllowance, autoMotion, hr, sent: function(){ return sent; },
+return { computeAllowance, motionAllowance, smoothAllowance, autoMotion, holdMotion, hr, sent: function(){ return sent; },
+         setClock: function(t){ clock = t; },
          resetAxis: function(){ AXIS.R0 = { limits: [0, 9999], lastPos: null }; },
          rise: A_RISE_PER_SEC, fall: A_FALL_PER_SEC };`)();
 
@@ -47,10 +50,12 @@ for (let tick = 0; tick < 6000; tick++) {          // 60 s of video, 10 ms ticks
         api.hr.bpm = Math.round(bpmAt(s) + [1, -1, 0][lastBeat % 3]);
         api.hr.at = now;
     }
+    api.setClock(now);
     const g = api.computeAllowance(now, ms);
     phases.add(g.phase);
     const n = api.sent().length;
-    api.autoMotion('R0', now, api.motionAllowance(g, now));
+    // As in playback: nothing is sent while holding at the edge.
+    if (!api.holdMotion(g, now)) api.autoMotion('R0', now, api.motionAllowance(g, now));
     if (api.sent().length > n) {
         const m = api.sent()[api.sent().length - 1];
         if (prev && tick > 100) worst = Math.max(worst, Math.abs(m.pos - prev.pos) / m.int * 1000);

@@ -27,8 +27,10 @@ Maintained by **dtt**. Originally based on Stash-TCode by Spunkle, with modifica
   0-100%, twist goes 0-100% of its own range, in step. Use the follower's Invert to reverse it.
   It applies when the axis has no script of its own, or always with **Override script** on.
 - Settings live in a dialog built from Stash's own components, so it matches Stash and any custom theme.
-- Heart-rate modulation, adaptive ceiling decay and climax markers (below).
-- A stats overlay on the video: heart rate, ceiling, edges and what the limiter is doing.
+- Heart-rate modulation, edge decay and climax markers (below).
+- A stats overlay on the video: heart rate, ceiling, edges and what the limiter is doing. Move the
+  mouse over the video for its controls: edge BPM −/+, climax markers on/off, and the limiter
+  (heart-rate modulation) on/off.
 - Handles seeking, including on transcoded streams.
 
 ## Screenshots
@@ -41,11 +43,11 @@ Maintained by **dtt**. Originally based on Stash-TCode by Spunkle, with modifica
 Left, the Heart Rate tab. Right, the Axes tab with twist set to follow stroke.
 
 The stats overlay on the video, two edges in: the ceiling has decayed from 120 to 118 BPM and strokes
-are easing off at 72%. The navbar button shows the device status and live heart rate; with heart-rate modulation on, a
+are easing off at 72%. Its controls are showing; they appear while the mouse moves over the video. The navbar button shows the device status and live heart rate; with heart-rate modulation on, a
 second dot beside the first shows whether the monitor is sending readings.
 
 <p>
-  <img src="docs/screenshots/overlay.png" alt="Stats overlay: 112 BPM, ceiling 118 (−2), easing 72%, 2 edges" width="300">
+  <img src="docs/screenshots/overlay.png" alt="Stats overlay: 112 BPM, ceiling 118 (−2), easing 72%, 2 edges, with the BPM −, BPM +, Climax and Limiter buttons" width="300">
   <br>
   <img src="docs/screenshots/navbar.png" alt="Navbar button showing Connected and a heart rate of 112" width="360">
 </p>
@@ -113,12 +115,16 @@ its heart rate. Then turn it on under **Heart Rate**.
 - **Edge** is the heart rate that counts as an edge, and it's your ceiling. In the **approach band**
   below it (default 10 BPM), strokes shorten linearly down to the **shortest stroke** (default 30%). The stroke shortens from the bottom of its
   range; other axes shrink toward their home position.
-- **At the ceiling** the stroker parks at the bottom of its range and sits out the script while the
-  video keeps playing. Once your heart rate drops 5 BPM below the ceiling, strokes ramp back in over
-  the **rejoin time** (default 8 s).
-- **Adaptive ceiling decay** lowers the ceiling 2 BPM every 2 edges, down to a floor (105 BPM by
+- **At the ceiling** every axis stops where it is and sits out the script while the
+  video keeps playing. Once your heart rate is more than the **recovery drop** below the ceiling
+  (default 5 BPM; 0 means 1 BPM under is enough), motion eases back into the script from where each axis
+  stopped, over the **rejoin time** (default 8 s).
+- **Edge decay** lowers the ceiling 2 BPM every 2 edges, down to a floor (105 BPM by
   default), to counter fatigue over a long session. It never raises the ceiling above what you typed.
-- **Signal timeout:** if a connected monitor sends no real reading for 8 s, the device stops. That
+  With **Fewer edges each step** on, the decay itself speeds up: the ceiling drops after 5 edges, then
+  4, then 3, and so on, since edges late in a session count for more than the first few. **Minimum**
+  sets where that stops, e.g. never fewer than 2 edges per step.
+- **Signal timeout:** if a connected monitor sends no real reading for 8 s, the device stops where it is. That
   includes a strap that's been taken off but keeps repeating its last BPM: packets flagged "no skin
   contact", or a strap that was timing beats and stopped, don't count as readings. With no monitor
   connected at all, scripts play normally.
@@ -127,8 +133,9 @@ its heart rate. Then turn it on under **Heart Rate**.
 
 Changes to how far each axis may move are eased in rather than applied at once. A monitor reports
 about once a second, so in the approach band each new reading would otherwise make every axis jump.
-Easing back in is gentle, and backing off at the edge happens within about a second. Losing the
-monitor's signal still stops the device immediately.
+Easing back in is gentle, and backing off happens within about a second. At an edge, and when the
+monitor's signal is lost, the device stops at once. How long it takes to rejoin the script afterwards
+is the rejoin time and nothing else: 0 goes straight back to the script.
 
 Chrome only reconnects a Bluetooth monitor after a refresh if
 `chrome://flags/#enable-web-bluetooth-new-permissions-backend` is on. Without it, the Device tab
@@ -185,6 +192,7 @@ node tests/serial.test.js
 node tests/linked.test.js
 node tests/smoothing.test.js
 node tests/idle.test.js
+node tests/hold.test.js
 node tests/player.test.js
 node tests/version.test.js
 ```
